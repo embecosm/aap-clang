@@ -5621,6 +5621,74 @@ validateAsmConstraint(const char *&Name,
     NumNames = llvm::array_lengthof(GCCRegNames);
   }
 
+  class AAPTargetInfo : public TargetInfo {
+    static const char * const GCCRegNames[];
+  public:
+    AAPTargetInfo(const llvm::Triple &Triple) : TargetInfo(Triple) {
+      BigEndian = false;
+      TLSSupported = false;
+      IntWidth = 16; IntAlign = 16;
+      LongWidth = 32; LongLongWidth = 64;
+      LongAlign = LongLongAlign = 16;
+      PointerWidth = 16; PointerAlign = 16;
+      SuitableAlign = 16;
+      SizeType = UnsignedInt;
+      IntMaxType = SignedLongLong;
+      IntPtrType = SignedInt;
+      PtrDiffType = SignedInt;
+      SigAtomicType = SignedLong;
+      DescriptionString = "e-m:e-p:16:16-n16";
+    }
+    void getTargetDefines(const LangOptions &Opts,
+                          MacroBuilder &Builder) const override {
+      Builder.defineMacro("AAP");
+      Builder.defineMacro("__AAP__");
+    }
+    void getTargetBuiltins(const Builtin::Info *&Records,
+                           unsigned &NumRecords) const override {
+      Records = nullptr;
+      NumRecords = 0;
+    }
+    bool hasFeature(StringRef Feature) const override {
+      return Feature == "AAP";
+    }
+    void getGCCRegNames(const char * const *&Names,
+                        unsigned &NumNames) const override;
+    void getGCCRegAliases(const GCCRegAlias *&Aliases,
+                          unsigned &NumAliases) const override {
+      // No aliases.
+      Aliases = nullptr;
+      NumAliases = 0;
+    }
+    bool
+    validateAsmConstraint(const char *&Name,
+                          TargetInfo::ConstraintInfo &info) const override {
+      // No target constraints for now.
+      return false;
+    }
+    const char *getClobbers() const override {
+      // FIXME: Is this really right?
+      return "";
+    }
+    BuiltinVaListKind getBuiltinVaListKind() const override {
+      // FIXME: implement
+      return TargetInfo::CharPtrBuiltinVaList;
+   }
+  };
+
+  const char * const AAPTargetInfo::GCCRegNames[] = {
+    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
+    "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
+    "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31"
+  };
+
+  void AAPTargetInfo::getGCCRegNames(const char * const *&Names,
+                                        unsigned &NumNames) const {
+    Names = GCCRegNames;
+    NumNames = llvm::array_lengthof(GCCRegNames);
+  }
+
   // LLVM and Clang cannot be used directly to output native binaries for
   // target, but is used to compile C code to llvm bitcode with correct
   // type and alignment information.
@@ -6704,6 +6772,9 @@ static TargetInfo *AllocateTarget(const llvm::Triple &Triple) {
 
   case llvm::Triple::msp430:
     return new MSP430TargetInfo(Triple);
+
+  case llvm::Triple::aap:
+    return new AAPTargetInfo(Triple);
 
   case llvm::Triple::mips:
     switch (os) {
