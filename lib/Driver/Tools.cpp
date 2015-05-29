@@ -1734,6 +1734,11 @@ void Clang::AddHexagonTargetArgs(const ArgList &Args,
   CmdArgs.push_back ("-machine-sink-split=0");
 }
 
+void Clang::AddAAPTargetArgs(const ArgList &Args,
+                             ArgStringList &CmdArgs) const {
+  return;
+}
+
 // Decode AArch64 features from string like +[no]featureA+[no]featureB+...
 static bool DecodeAArch64Features(const Driver &D, StringRef text,
                                   std::vector<const char *> &Features) {
@@ -3180,6 +3185,10 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // Add target specific flags.
   switch(getToolChain().getArch()) {
   default:
+    break;
+
+  case llvm::Triple::aap:
+    AddAAPTargetArgs(Args, CmdArgs);
     break;
 
   case llvm::Triple::arm:
@@ -8846,3 +8855,74 @@ void CrossWindows::Link::ConstructJob(Compilation &C, const JobAction &JA,
 
   C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs));
 }
+
+void AAP::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
+                                 const InputInfo &Output,
+                                 const InputInfoList &Inputs,
+                                 const ArgList &Args,
+                                 const char *LinkingOutput) const {
+  ArgStringList CmdArgs;
+
+  // Add input assembly files to command line
+  for (InputInfoList::const_iterator it = Inputs.begin(), ie = Inputs.end();
+       it != ie;
+       ++it) {
+    const InputInfo &II = *it;
+    CmdArgs.push_back(II.getFilename());
+  }
+
+  const char *Exec =
+    Args.MakeArgString(getToolChain().GetProgramPath("aap-as"));
+
+  C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs));
+}
+
+void AAP::Link::ConstructJob(Compilation &C, const JobAction &JA,
+                             const InputInfo &Output,
+                             const InputInfoList &Inputs,
+                             const ArgList &Args,
+                             const char *LinkingOutput) const {
+  ArgStringList CmdArgs;
+
+  // Add crt0 and libc
+  const toolchains::AAP& ToolChain =
+    static_cast<const toolchains::AAP&>(getToolChain());
+  const Driver &D = ToolChain.getDriver();
+
+  const std::string InstallPrefix = D.InstalledDir;
+  const std::string LibFilesDir = InstallPrefix + "/../aap/lib";
+  const std::string crt0 = LibFilesDir + "/crt0.o";
+  const std::string libpath = "-L" + LibFilesDir;
+
+  if (!Args.hasArg(options::OPT_nostdlib) &&
+      !Args.hasArg(options::OPT_nostartfiles)) {
+    CmdArgs.push_back(Args.MakeArgString(crt0));
+  }
+  AddLinkerInputs(getToolChain(), Inputs, Args, CmdArgs);
+
+  CmdArgs.push_back(Args.MakeArgString(libpath));
+  if (!Args.hasArg(options::OPT_nostdlib)) {
+    CmdArgs.push_back("-lc");
+    CmdArgs.push_back("-laap");
+
+    // No compiler-rt yet
+    //CmdArgs.push_back("-lcompiler_rt");
+
+    // This may need to link a second time to resolve interdependencies
+  }
+
+  Args.AddAllArgs(CmdArgs, options::OPT_L);
+
+  if (Output.isFilename()) {
+    CmdArgs.push_back("-o");
+    CmdArgs.push_back(Output.getFilename());
+  }
+  else {
+    assert(Output.isNothing() && "Input output");
+  }
+
+  const char *Exec =
+    Args.MakeArgString(getToolChain().GetProgramPath("aap-ld"));
+  C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs));
+}
+

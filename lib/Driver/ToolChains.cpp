@@ -3674,3 +3674,46 @@ void XCore::AddCXXStdlibLibArgs(const ArgList &Args,
                                 ArgStringList &CmdArgs) const {
   // We don't output any lib args. This is handled by xcc.
 }
+
+
+/// AAP tool chain
+AAP::AAP(const Driver &D, const llvm::Triple &Triple,
+         const ArgList &Args) : ToolChain(D, Triple, Args) {
+  // Program paths are assumed to be locatable through the 'PATH' env variable
+}
+
+Tool *AAP::buildAssembler() const {
+  return new tools::AAP::Assemble(*this);
+}
+
+Tool *AAP::buildLinker() const {
+  return new tools::AAP::Link(*this);
+}
+
+bool AAP::HasNativeLLVMSupport() const {
+  return true;
+}
+
+void AAP::AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                                    llvm::opt::ArgStringList &CC1Args) const {
+  const Driver &D = getDriver();
+
+  if (DriverArgs.hasArg(options::OPT_nostdinc) ||
+      DriverArgs.hasArg(options::OPT_nostdlibinc)) {
+    return;
+  }
+
+  // standard system includes are disabled, so we add our own
+  const std::string InstallPrefix = D.InstalledDir;
+  const std::string IncludeDir = InstallPrefix + "/../aap/include";
+  StringRef IncludeDirStr(IncludeDir);
+
+  addSystemIncludes(DriverArgs, CC1Args, IncludeDirStr);
+}
+
+void AAP::addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
+                                llvm::opt::ArgStringList &CC1Args) const {
+  CC1Args.push_back("-nostdsysteminc");
+  CC1Args.push_back("-dwarf-column-info");
+}
+

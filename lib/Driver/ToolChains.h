@@ -856,6 +856,29 @@ public:
                            llvm::opt::ArgStringList &CmdArgs) const override;
 };
 
+class LLVM_LIBRARY_VISIBILITY AAP : public ToolChain {
+public:
+  AAP(const Driver &D, const llvm::Triple &Triple,
+      const llvm::opt::ArgList &Args);
+protected:
+  Tool *buildAssembler() const override;
+  Tool *buildLinker() const override;
+public:
+  bool isPICDefault() const override { return false; }
+  bool isPIEDefault() const override { return false; }
+  bool isPICDefaultForced() const override { return true; }
+  bool HasNativeLLVMSupport() const override;
+
+  bool IsIntegratedAssemblerDefault() const override { return true; }
+  bool SupportsProfiling() const override { return false; }
+  bool hasBlocksRuntime() const override { return false; }
+
+  void AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                                 llvm::opt::ArgStringList &CC1Args) const override;
+  void addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
+                             llvm::opt::ArgStringList &CC1Args) const override;
+};
+
 } // end namespace toolchains
 } // end namespace driver
 } // end namespace clang
