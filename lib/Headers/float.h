@@ -74,7 +74,14 @@
 /* Characteristics of floating point types, C99 5.2.4.2.2 */
 
 #define FLT_EVAL_METHOD __FLT_EVAL_METHOD__
-#define FLT_ROUNDS (__builtin_flt_rounds())
+
+/* __builtin_flt_rounds is not supported by AAP, and the rounding mode cannot
+   be changed anyway so we just default to 'to nearest' */
+#ifdef __AAP__
+  #define FLT_ROUNDS 1
+#else
+  #define FLT_ROUNDS (__builtin_flt_rounds())
+#endif
 #define FLT_RADIX __FLT_RADIX__
 
 #define FLT_MANT_DIG __FLT_MANT_DIG__
