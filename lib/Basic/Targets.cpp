@@ -5631,13 +5631,18 @@ validateAsmConstraint(const char *&Name,
       LongWidth = 32; LongLongWidth = 64;
       LongAlign = LongLongAlign = 16;
       PointerWidth = 16; PointerAlign = 16;
+      
+      // float/double alignment needed when accessing va_args
+      FloatWidth  = 32; FloatAlign  = 16;
+      DoubleWidth = 64; DoubleAlign = 16;
+
       SuitableAlign = 16;
       SizeType = UnsignedInt;
       IntMaxType = SignedLongLong;
       IntPtrType = SignedInt;
       PtrDiffType = SignedInt;
       SigAtomicType = SignedLong;
-      DescriptionString = "e-m:e-p:16:16-n16";
+      DescriptionString = "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-n16";
     }
     void getTargetDefines(const LangOptions &Opts,
                           MacroBuilder &Builder) const override {
