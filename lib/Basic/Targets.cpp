@@ -5667,9 +5667,14 @@ validateAsmConstraint(const char *&Name,
     }
     bool
     validateAsmConstraint(const char *&Name,
-                          TargetInfo::ConstraintInfo &info) const override {
-      // No target constraints for now.
-      return false;
+                          TargetInfo::ConstraintInfo &Info) const override {
+      switch (*Name) {
+      default:
+        return false;
+      case 'r': // CPU registers.
+        Info.setAllowsRegister();
+        return true;
+      }
     }
     const char *getClobbers() const override {
       // FIXME: Is this really right?
