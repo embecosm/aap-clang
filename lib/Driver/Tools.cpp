@@ -8904,9 +8904,7 @@ void AAP::Link::ConstructJob(Compilation &C, const JobAction &JA,
   if (!Args.hasArg(options::OPT_nostdlib)) {
     CmdArgs.push_back("-lc");
     CmdArgs.push_back("-laap");
-
-    // No compiler-rt yet
-    //CmdArgs.push_back("-lcompiler_rt");
+    CmdArgs.push_back("-lcompiler_rt");
 
     // This may need to link a second time to resolve interdependencies
   }
