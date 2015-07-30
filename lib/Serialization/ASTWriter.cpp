@@ -60,14 +60,14 @@ using namespace clang;
 using namespace clang::serialization;
 
 template <typename T, typename Allocator>
-static StringRef data(const std::vector<T, Allocator> &v) {
+static StringRef bytes(const std::vector<T, Allocator> &v) {
   if (v.empty()) return StringRef();
   return StringRef(reinterpret_cast<const char*>(&v[0]),
                          sizeof(T) * v.size());
 }
 
 template <typename T>
-static StringRef data(const SmallVectorImpl<T> &v) {
+static StringRef bytes(const SmallVectorImpl<T> &v) {
   return StringRef(reinterpret_cast<const char*>(v.data()),
                          sizeof(T) * v.size());
 }
@@ -421,9 +421,13 @@ void ASTTypeWriter::VisitObjCInterfaceType(const ObjCInterfaceType *T) {
 
 void ASTTypeWriter::VisitObjCObjectType(const ObjCObjectType *T) {
   Writer.AddTypeRef(T->getBaseType(), Record);
+  Record.push_back(T->getTypeArgsAsWritten().size());
+  for (auto TypeArg : T->getTypeArgsAsWritten())
+    Writer.AddTypeRef(TypeArg, Record);
   Record.push_back(T->getNumProtocols());
   for (const auto *I : T->quals())
     Writer.AddDeclRef(I, Record);
+  Record.push_back(T->isKindOfTypeAsWritten());
   Code = TYPE_OBJC_OBJECT;
 }
 
@@ -648,8 +652,12 @@ void TypeLocWriter::VisitObjCInterfaceTypeLoc(ObjCInterfaceTypeLoc TL) {
 }
 void TypeLocWriter::VisitObjCObjectTypeLoc(ObjCObjectTypeLoc TL) {
   Record.push_back(TL.hasBaseTypeAsWritten());
-  Writer.AddSourceLocation(TL.getLAngleLoc(), Record);
-  Writer.AddSourceLocation(TL.getRAngleLoc(), Record);
+  Writer.AddSourceLocation(TL.getTypeArgsLAngleLoc(), Record);
+  Writer.AddSourceLocation(TL.getTypeArgsRAngleLoc(), Record);
+  for (unsigned i = 0, e = TL.getNumTypeArgs(); i != e; ++i)
+    Writer.AddTypeSourceInfo(TL.getTypeArgTInfo(i), Record);
+  Writer.AddSourceLocation(TL.getProtocolLAngleLoc(), Record);
+  Writer.AddSourceLocation(TL.getProtocolRAngleLoc(), Record);
   for (unsigned i = 0, e = TL.getNumProtocols(); i != e; ++i)
     Writer.AddSourceLocation(TL.getProtocolLoc(i), Record);
 }
@@ -774,7 +782,9 @@ static void AddStmtsExprs(llvm::BitstreamWriter &Stream,
   RECORD(EXPR_EXT_VECTOR_ELEMENT);
   RECORD(EXPR_INIT_LIST);
   RECORD(EXPR_DESIGNATED_INIT);
+  RECORD(EXPR_DESIGNATED_INIT_UPDATE);
   RECORD(EXPR_IMPLICIT_VALUE_INIT);
+  RECORD(EXPR_NO_INIT);
   RECORD(EXPR_VA_ARG);
   RECORD(EXPR_ADDR_LABEL);
   RECORD(EXPR_STMT);
@@ -927,7 +937,6 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(LOCAL_REDECLARATIONS);
   RECORD(OBJC_CATEGORIES);
   RECORD(MACRO_OFFSET);
-  RECORD(MACRO_TABLE);
   RECORD(LATE_PARSED_TEMPLATE);
   RECORD(OPTIMIZE_PRAGMA_OPTIONS);
 
@@ -941,8 +950,9 @@ void ASTWriter::WriteBlockInfoBlock() {
   // Preprocessor Block.
   BLOCK(PREPROCESSOR_BLOCK);
   RECORD(PP_MACRO_DIRECTIVE_HISTORY);
-  RECORD(PP_MACRO_OBJECT_LIKE);
   RECORD(PP_MACRO_FUNCTION_LIKE);
+  RECORD(PP_MACRO_OBJECT_LIKE);
+  RECORD(PP_MODULE_MACRO);
   RECORD(PP_TOKEN);
 
   // Decls and Types block.
@@ -1264,11 +1274,14 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
   Record.push_back(LangOpts.Sanitize.has(SanitizerKind::ID));
 #include "clang/Basic/Sanitizers.def"
 
+  Record.push_back(LangOpts.ModuleFeatures.size());
+  for (StringRef Feature : LangOpts.ModuleFeatures)
+    AddString(Feature, Record);
+
   Record.push_back((unsigned) LangOpts.ObjCRuntime.getKind());
   AddVersionTuple(LangOpts.ObjCRuntime.getVersion(), Record);
-  
-  Record.push_back(LangOpts.CurrentModule.size());
-  Record.append(LangOpts.CurrentModule.begin(), LangOpts.CurrentModule.end());
+
+  AddString(LangOpts.CurrentModule, Record);
 
   // Comment options.
   Record.push_back(LangOpts.CommentOpts.BlockCommandNames.size());
@@ -1530,7 +1543,7 @@ void ASTWriter::WriteInputFiles(SourceManager &SourceMgr,
   Record.push_back(INPUT_FILE_OFFSETS);
   Record.push_back(InputFileOffsets.size());
   Record.push_back(UserFilesNum);
-  Stream.EmitRecordWithBlob(OffsetsAbbrevCode, Record, data(InputFileOffsets));
+  Stream.EmitRecordWithBlob(OffsetsAbbrevCode, Record, bytes(InputFileOffsets));
 }
 
 //===----------------------------------------------------------------------===//
@@ -1925,7 +1938,7 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
   Record.push_back(SOURCE_LOCATION_OFFSETS);
   Record.push_back(SLocEntryOffsets.size());
   Record.push_back(SourceMgr.getNextLocalOffset() - 1); // skip dummy
-  Stream.EmitRecordWithBlob(SLocOffsetsAbbrev, Record, data(SLocEntryOffsets));
+  Stream.EmitRecordWithBlob(SLocOffsetsAbbrev, Record, bytes(SLocEntryOffsets));
 
   // Write the source location entry preloads array, telling the AST
   // reader which source locations entries it should load eagerly.
@@ -1972,52 +1985,6 @@ void ASTWriter::WriteSourceManagerBlock(SourceManager &SourceMgr,
 // Preprocessor Serialization
 //===----------------------------------------------------------------------===//
 
-namespace {
-class ASTMacroTableTrait {
-public:
-  typedef IdentID key_type;
-  typedef key_type key_type_ref;
-
-  struct Data {
-    uint32_t MacroDirectivesOffset;
-  };
-
-  typedef Data data_type;
-  typedef const data_type &data_type_ref;
-  typedef unsigned hash_value_type;
-  typedef unsigned offset_type;
-
-  static hash_value_type ComputeHash(IdentID IdID) {
-    return llvm::hash_value(IdID);
-  }
-
-  std::pair<unsigned,unsigned>
-  static EmitKeyDataLength(raw_ostream& Out,
-                           key_type_ref Key, data_type_ref Data) {
-    unsigned KeyLen = 4; // IdentID.
-    unsigned DataLen = 4; // MacroDirectivesOffset.
-    return std::make_pair(KeyLen, DataLen);
-  }
-
-  static void EmitKey(raw_ostream& Out, key_type_ref Key, unsigned KeyLen) {
-    using namespace llvm::support;
-    endian::Writer<little>(Out).write<uint32_t>(Key);
-  }
-
-  static void EmitData(raw_ostream& Out, key_type_ref Key, data_type_ref Data,
-                       unsigned) {
-    using namespace llvm::support;
-    endian::Writer<little>(Out).write<uint32_t>(Data.MacroDirectivesOffset);
-  }
-};
-} // end anonymous namespace
-
-static int compareMacroDirectives(
-    const std::pair<const IdentifierInfo *, MacroDirective *> *X,
-    const std::pair<const IdentifierInfo *, MacroDirective *> *Y) {
-  return X->first->getName().compare(Y->first->getName());
-}
-
 static bool shouldIgnoreMacro(MacroDirective *MD, bool IsModule,
                               const Preprocessor &PP) {
   if (MacroInfo *MI = MD->getMacroInfo())
@@ -2025,10 +1992,6 @@ static bool shouldIgnoreMacro(MacroDirective *MD, bool IsModule,
       return true;
 
   if (IsModule) {
-    // Re-export any imported directives.
-    if (MD->isImported())
-      return false;
-
     SourceLocation Loc = MD->getLocation();
     if (Loc.isInvalid())
       return true;
@@ -2048,6 +2011,7 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
     WritePreprocessorDetail(*PPRec);
 
   RecordData Record;
+  RecordData ModuleMacroRecord;
 
   // If the preprocessor __COUNTER__ value has been bumped, remember it.
   if (PP.getCounterValue() != 0) {
@@ -2068,74 +2032,75 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
   // Loop over all the macro directives that are live at the end of the file,
   // emitting each to the PP section.
 
-  // Construct the list of macro directives that need to be serialized.
-  SmallVector<std::pair<const IdentifierInfo *, MacroDirective *>, 2>
-    MacroDirectives;
-  for (Preprocessor::macro_iterator
-         I = PP.macro_begin(/*IncludeExternalMacros=*/false),
-         E = PP.macro_end(/*IncludeExternalMacros=*/false);
-       I != E; ++I) {
-    MacroDirectives.push_back(std::make_pair(I->first, I->second));
-  }
-
+  // Construct the list of identifiers with macro directives that need to be
+  // serialized.
+  SmallVector<const IdentifierInfo *, 128> MacroIdentifiers;
+  for (auto &Id : PP.getIdentifierTable())
+    if (Id.second->hadMacroDefinition() &&
+        (!Id.second->isFromAST() ||
+         Id.second->hasChangedSinceDeserialization()))
+      MacroIdentifiers.push_back(Id.second);
   // Sort the set of macro definitions that need to be serialized by the
   // name of the macro, to provide a stable ordering.
-  llvm::array_pod_sort(MacroDirectives.begin(), MacroDirectives.end(),
-                       &compareMacroDirectives);
-
-  llvm::OnDiskChainedHashTableGenerator<ASTMacroTableTrait> Generator;
+  std::sort(MacroIdentifiers.begin(), MacroIdentifiers.end(),
+            llvm::less_ptr<IdentifierInfo>());
 
   // Emit the macro directives as a list and associate the offset with the
   // identifier they belong to.
-  for (unsigned I = 0, N = MacroDirectives.size(); I != N; ++I) {
-    const IdentifierInfo *Name = MacroDirectives[I].first;
-    uint64_t MacroDirectiveOffset = Stream.GetCurrentBitNo();
-    MacroDirective *MD = MacroDirectives[I].second;
-
-    // If the macro or identifier need no updates, don't write the macro history
-    // for this one.
-    // FIXME: Chain the macro history instead of re-writing it.
-    if (MD->isFromPCH() &&
-        Name->isFromAST() && !Name->hasChangedSinceDeserialization())
-      continue;
+  for (const IdentifierInfo *Name : MacroIdentifiers) {
+    MacroDirective *MD = PP.getLocalMacroDirectiveHistory(Name);
+    auto StartOffset = Stream.GetCurrentBitNo();
 
     // Emit the macro directives in reverse source order.
     for (; MD; MD = MD->getPrevious()) {
+      // Once we hit an ignored macro, we're done: the rest of the chain
+      // will all be ignored macros.
       if (shouldIgnoreMacro(MD, IsModule, PP))
-        continue;
+        break;
 
       AddSourceLocation(MD->getLocation(), Record);
       Record.push_back(MD->getKind());
       if (auto *DefMD = dyn_cast<DefMacroDirective>(MD)) {
-        MacroID InfoID = getMacroRef(DefMD->getInfo(), Name);
-        Record.push_back(InfoID);
-        Record.push_back(DefMD->getOwningModuleID());
-        Record.push_back(DefMD->isAmbiguous());
-      } else if (auto *UndefMD = dyn_cast<UndefMacroDirective>(MD)) {
-        Record.push_back(UndefMD->getOwningModuleID());
-      } else {
-        auto *VisMD = cast<VisibilityMacroDirective>(MD);
+        Record.push_back(getMacroRef(DefMD->getInfo(), Name));
+      } else if (auto *VisMD = dyn_cast<VisibilityMacroDirective>(MD)) {
         Record.push_back(VisMD->isPublic());
       }
+    }
 
-      if (MD->isImported()) {
-        auto Overrides = MD->getOverriddenModules();
-        Record.push_back(Overrides.size());
-        Record.append(Overrides.begin(), Overrides.end());
+    // Write out any exported module macros.
+    bool EmittedModuleMacros = false;
+    if (IsModule) {
+      auto Leafs = PP.getLeafModuleMacros(Name);
+      SmallVector<ModuleMacro*, 8> Worklist(Leafs.begin(), Leafs.end());
+      llvm::DenseMap<ModuleMacro*, unsigned> Visits;
+      while (!Worklist.empty()) {
+        auto *Macro = Worklist.pop_back_val();
+
+        // Emit a record indicating this submodule exports this macro.
+        ModuleMacroRecord.push_back(
+            getSubmoduleID(Macro->getOwningModule()));
+        ModuleMacroRecord.push_back(getMacroRef(Macro->getMacroInfo(), Name));
+        for (auto *M : Macro->overrides())
+          ModuleMacroRecord.push_back(getSubmoduleID(M->getOwningModule()));
+
+        Stream.EmitRecord(PP_MODULE_MACRO, ModuleMacroRecord);
+        ModuleMacroRecord.clear();
+
+        // Enqueue overridden macros once we've visited all their ancestors.
+        for (auto *M : Macro->overrides())
+          if (++Visits[M] == M->getNumOverridingMacros())
+            Worklist.push_back(M);
+
+        EmittedModuleMacros = true;
       }
     }
-    if (Record.empty())
+
+    if (Record.empty() && !EmittedModuleMacros)
       continue;
 
+    IdentMacroDirectivesOffsetMap[Name] = StartOffset;
     Stream.EmitRecord(PP_MACRO_DIRECTIVE_HISTORY, Record);
     Record.clear();
-
-    IdentMacroDirectivesOffsetMap[Name] = MacroDirectiveOffset;
-
-    IdentID NameID = getIdentifierRef(Name);
-    ASTMacroTableTrait::Data data;
-    data.MacroDirectivesOffset = MacroDirectiveOffset;
-    Generator.insert(NameID, data);
   }
 
   /// \brief Offsets of each of the macros into the bitstream, indexed by
@@ -2183,9 +2148,8 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
       Record.push_back(MI->isGNUVarargs());
       Record.push_back(MI->hasCommaPasting());
       Record.push_back(MI->getNumArgs());
-      for (MacroInfo::arg_iterator I = MI->arg_begin(), E = MI->arg_end();
-           I != E; ++I)
-        AddIdentifierRef(*I, Record);
+      for (const IdentifierInfo *Arg : MI->args())
+        AddIdentifierRef(Arg, Record);
     }
 
     // If we have a detailed preprocessing record, record the macro definition
@@ -2211,33 +2175,9 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
 
   Stream.ExitBlock();
 
-  // Create the on-disk hash table in a buffer.
-  SmallString<4096> MacroTable;
-  uint32_t BucketOffset;
-  {
-    using namespace llvm::support;
-    llvm::raw_svector_ostream Out(MacroTable);
-    // Make sure that no bucket is at offset 0
-    endian::Writer<little>(Out).write<uint32_t>(0);
-    BucketOffset = Generator.Emit(Out);
-  }
-
-  // Write the macro table
-  using namespace llvm;
-  BitCodeAbbrev *Abbrev = new BitCodeAbbrev();
-  Abbrev->Add(BitCodeAbbrevOp(MACRO_TABLE));
-  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 32));
-  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob));
-  unsigned MacroTableAbbrev = Stream.EmitAbbrev(Abbrev);
-
-  Record.push_back(MACRO_TABLE);
-  Record.push_back(BucketOffset);
-  Stream.EmitRecordWithBlob(MacroTableAbbrev, Record, MacroTable);
-  Record.clear();
-
   // Write the offsets table for macro IDs.
   using namespace llvm;
-  Abbrev = new BitCodeAbbrev();
+  auto *Abbrev = new BitCodeAbbrev();
   Abbrev->Add(BitCodeAbbrevOp(MACRO_OFFSET));
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 32)); // # of macros
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 32)); // first ID
@@ -2249,7 +2189,7 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
   Record.push_back(MacroOffsets.size());
   Record.push_back(FirstMacroID - NUM_PREDEF_MACRO_IDS);
   Stream.EmitRecordWithBlob(MacroOffsetAbbrev, Record,
-                            data(MacroOffsets));
+                            bytes(MacroOffsets));
 }
 
 void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec) {
@@ -2289,13 +2229,13 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec) {
        (void)++E, ++NumPreprocessingRecords, ++NextPreprocessorEntityID) {
     Record.clear();
 
-    PreprocessedEntityOffsets.push_back(PPEntityOffset((*E)->getSourceRange(),
-                                                     Stream.GetCurrentBitNo()));
+    PreprocessedEntityOffsets.push_back(
+        PPEntityOffset((*E)->getSourceRange(), Stream.GetCurrentBitNo()));
 
-    if (MacroDefinition *MD = dyn_cast<MacroDefinition>(*E)) {
+    if (MacroDefinitionRecord *MD = dyn_cast<MacroDefinitionRecord>(*E)) {
       // Record this macro definition's ID.
       MacroDefinitions[MD] = NextPreprocessorEntityID;
-      
+
       AddIdentifierRef(MD->getName(), Record);
       Stream.EmitRecord(PPD_MACRO_DEFINITION, Record);
       continue;
@@ -2347,7 +2287,7 @@ void ASTWriter::WritePreprocessorDetail(PreprocessingRecord &PPRec) {
     Record.push_back(PPD_ENTITIES_OFFSETS);
     Record.push_back(FirstPreprocessorEntityID - NUM_PREDEF_PP_ENTITY_IDS);
     Stream.EmitRecordWithBlob(PPEOffsetAbbrev, Record,
-                              data(PreprocessedEntityOffsets));
+                              bytes(PreprocessedEntityOffsets));
   }
 }
 
@@ -2384,19 +2324,6 @@ static unsigned getNumberOfModules(Module *Mod) {
 }
 
 void ASTWriter::WriteSubmodules(Module *WritingModule) {
-  // Determine the dependencies of our module and each of it's submodules.
-  // FIXME: This feels like it belongs somewhere else, but there are no
-  // other consumers of this information.
-  SourceManager &SrcMgr = PP->getSourceManager();
-  ModuleMap &ModMap = PP->getHeaderSearchInfo().getModuleMap();
-  for (const auto *I : Context->local_imports()) {
-    if (Module *ImportedFrom
-          = ModMap.inferModuleFromLocation(FullSourceLoc(I->getLocation(), 
-                                                         SrcMgr))) {
-      ImportedFrom->Imports.push_back(I->getImportedModule());
-    }
-  }
-  
   // Enter the submodule description block.
   Stream.EnterSubblock(SUBMODULE_BLOCK_ID, /*bits for abbreviations*/5);
   
@@ -2524,16 +2451,16 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
     }
 
     // Emit the umbrella header, if there is one.
-    if (const FileEntry *UmbrellaHeader = Mod->getUmbrellaHeader()) {
+    if (auto UmbrellaHeader = Mod->getUmbrellaHeader()) {
       Record.clear();
       Record.push_back(SUBMODULE_UMBRELLA_HEADER);
-      Stream.EmitRecordWithBlob(UmbrellaAbbrev, Record, 
-                                UmbrellaHeader->getName());
-    } else if (const DirectoryEntry *UmbrellaDir = Mod->getUmbrellaDir()) {
+      Stream.EmitRecordWithBlob(UmbrellaAbbrev, Record,
+                                UmbrellaHeader.NameAsWritten);
+    } else if (auto UmbrellaDir = Mod->getUmbrellaDir()) {
       Record.clear();
       Record.push_back(SUBMODULE_UMBRELLA_DIR);
       Stream.EmitRecordWithBlob(UmbrellaDirAbbrev, Record, 
-                                UmbrellaDir->getName());      
+                                UmbrellaDir.NameAsWritten);
     }
 
     // Emit the headers.
@@ -2581,8 +2508,7 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
       Record.clear();
       for (unsigned I = 0, N = Mod->Exports.size(); I != N; ++I) {
         if (Module *Exported = Mod->Exports[I].getPointer()) {
-          unsigned ExportedID = SubmoduleIDs[Exported];
-          assert(ExportedID > 0 && "Unknown submodule ID?");
+          unsigned ExportedID = getSubmoduleID(Exported);
           Record.push_back(ExportedID);
         } else {
           Record.push_back(0);
@@ -2633,9 +2559,14 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
   }
   
   Stream.ExitBlock();
-  
-  assert((NextSubmoduleID - FirstSubmoduleID
-            == getNumberOfModules(WritingModule)) && "Wrong # of submodules");
+
+  // FIXME: This can easily happen, if we have a reference to a submodule that
+  // did not result in us loading a module file for that submodule. For
+  // instance, a cross-top-level-module 'conflict' declaration will hit this.
+  assert((NextSubmoduleID - FirstSubmoduleID ==
+          getNumberOfModules(WritingModule)) &&
+         "Wrong # of submodules; found a reference to a non-local, "
+         "non-imported submodule?");
 }
 
 serialization::SubmoduleID 
@@ -2719,7 +2650,7 @@ void ASTWriter::WriteCXXCtorInitializersOffsets() {
   Record.push_back(CXX_CTOR_INITIALIZERS_OFFSETS);
   Record.push_back(CXXCtorInitializersOffsets.size());
   Stream.EmitRecordWithBlob(CtorInitializersOffsetAbbrev, Record,
-                            data(CXXCtorInitializersOffsets));
+                            bytes(CXXCtorInitializersOffsets));
 }
 
 void ASTWriter::WriteCXXBaseSpecifiersOffsets() {
@@ -2742,7 +2673,7 @@ void ASTWriter::WriteCXXBaseSpecifiersOffsets() {
   Record.push_back(CXX_BASE_SPECIFIER_OFFSETS);
   Record.push_back(CXXBaseSpecifiersOffsets.size());
   Stream.EmitRecordWithBlob(BaseSpecifierOffsetAbbrev, Record,
-                            data(CXXBaseSpecifiersOffsets));
+                            bytes(CXXBaseSpecifiersOffsets));
 }
 
 //===----------------------------------------------------------------------===//
@@ -2818,7 +2749,7 @@ uint64_t ASTWriter::WriteDeclContextLexicalBlock(ASTContext &Context,
     Decls.push_back(std::make_pair(D->getKind(), GetDeclRef(D)));
 
   ++NumLexicalDeclContexts;
-  Stream.EmitRecordWithBlob(DeclContextLexicalAbbrev, Record, data(Decls));
+  Stream.EmitRecordWithBlob(DeclContextLexicalAbbrev, Record, bytes(Decls));
   return Offset;
 }
 
@@ -2837,7 +2768,7 @@ void ASTWriter::WriteTypeDeclOffsets() {
   Record.push_back(TYPE_OFFSET);
   Record.push_back(TypeOffsets.size());
   Record.push_back(FirstTypeID - NUM_PREDEF_TYPE_IDS);
-  Stream.EmitRecordWithBlob(TypeOffsetAbbrev, Record, data(TypeOffsets));
+  Stream.EmitRecordWithBlob(TypeOffsetAbbrev, Record, bytes(TypeOffsets));
 
   // Write the declaration offsets array
   Abbrev = new BitCodeAbbrev();
@@ -2850,7 +2781,7 @@ void ASTWriter::WriteTypeDeclOffsets() {
   Record.push_back(DECL_OFFSET);
   Record.push_back(DeclOffsets.size());
   Record.push_back(FirstDeclID - NUM_PREDEF_DECL_IDS);
-  Stream.EmitRecordWithBlob(DeclOffsetAbbrev, Record, data(DeclOffsets));
+  Stream.EmitRecordWithBlob(DeclOffsetAbbrev, Record, bytes(DeclOffsets));
 }
 
 void ASTWriter::WriteFileDeclIDsMap() {
@@ -2878,7 +2809,7 @@ void ASTWriter::WriteFileDeclIDsMap() {
   unsigned AbbrevCode = Stream.EmitAbbrev(Abbrev);
   Record.push_back(FILE_SORTED_DECLS);
   Record.push_back(FileGroupedDeclIDs.size());
-  Stream.EmitRecordWithBlob(AbbrevCode, Record, data(FileGroupedDeclIDs));
+  Stream.EmitRecordWithBlob(AbbrevCode, Record, bytes(FileGroupedDeclIDs));
 }
 
 void ASTWriter::WriteComments() {
@@ -3107,7 +3038,7 @@ void ASTWriter::WriteSelectors(Sema &SemaRef) {
     Record.push_back(SelectorOffsets.size());
     Record.push_back(FirstSelectorID - NUM_PREDEF_SELECTOR_IDS);
     Stream.EmitRecordWithBlob(SelectorOffsetAbbrev, Record,
-                              data(SelectorOffsets));
+                              bytes(SelectorOffsets));
   }
 }
 
@@ -3171,167 +3102,21 @@ class ASTIdentifierTableTrait {
   ASTWriter &Writer;
   Preprocessor &PP;
   IdentifierResolver &IdResolver;
-  bool IsModule;
   
-  /// \brief Determines whether this is an "interesting" identifier
-  /// that needs a full IdentifierInfo structure written into the hash
-  /// table.
-  bool isInterestingIdentifier(IdentifierInfo *II, MacroDirective *&Macro) {
-    if (II->isPoisoned() ||
+  /// \brief Determines whether this is an "interesting" identifier that needs a
+  /// full IdentifierInfo structure written into the hash table. Notably, this
+  /// doesn't check whether the name has macros defined; use PublicMacroIterator
+  /// to check that.
+  bool isInterestingIdentifier(IdentifierInfo *II, uint64_t MacroOffset) {
+    if (MacroOffset ||
+        II->isPoisoned() ||
         II->isExtensionToken() ||
         II->getObjCOrBuiltinID() ||
         II->hasRevertedTokenIDToIdentifier() ||
         II->getFETokenInfo<void>())
       return true;
 
-    return hadMacroDefinition(II, Macro);
-  }
-
-  bool hadMacroDefinition(IdentifierInfo *II, MacroDirective *&Macro) {
-    if (!II->hadMacroDefinition())
-      return false;
-
-    if (Macro || (Macro = PP.getMacroDirectiveHistory(II))) {
-      if (!IsModule)
-        return !shouldIgnoreMacro(Macro, IsModule, PP);
-
-      MacroState State;
-      if (getFirstPublicSubmoduleMacro(Macro, State))
-        return true;
-    }
-
     return false;
-  }
-
-  enum class SubmoduleMacroState {
-    /// We've seen nothing about this macro.
-    None,
-    /// We've seen a public visibility directive.
-    Public,
-    /// We've either exported a macro for this module or found that the
-    /// module's definition of this macro is private.
-    Done
-  };
-  typedef llvm::DenseMap<SubmoduleID, SubmoduleMacroState> MacroState;
-
-  MacroDirective *
-  getFirstPublicSubmoduleMacro(MacroDirective *MD, MacroState &State) {
-    if (MacroDirective *NextMD = getPublicSubmoduleMacro(MD, State))
-      return NextMD;
-    return nullptr;
-  }
-
-  MacroDirective *
-  getNextPublicSubmoduleMacro(MacroDirective *MD, MacroState &State) {
-    if (MacroDirective *NextMD =
-            getPublicSubmoduleMacro(MD->getPrevious(), State))
-      return NextMD;
-    return nullptr;
-  }
-
-  /// \brief Traverses the macro directives history and returns the next
-  /// public macro definition or undefinition that has not been found so far.
-  ///
-  /// A macro that is defined in submodule A and undefined in submodule B
-  /// will still be considered as defined/exported from submodule A.
-  MacroDirective *getPublicSubmoduleMacro(MacroDirective *MD,
-                                          MacroState &State) {
-    if (!MD)
-      return nullptr;
-
-    Optional<bool> IsPublic;
-    for (; MD; MD = MD->getPrevious()) {
-      // Once we hit an ignored macro, we're done: the rest of the chain
-      // will all be ignored macros.
-      if (shouldIgnoreMacro(MD, IsModule, PP))
-        break;
-
-      // If this macro was imported, re-export it.
-      if (MD->isImported())
-        return MD;
-
-      SubmoduleID ModID = getSubmoduleID(MD);
-      auto &S = State[ModID];
-      assert(ModID && "found macro in no submodule");
-
-      if (S == SubmoduleMacroState::Done)
-        continue;
-
-      if (auto *VisMD = dyn_cast<VisibilityMacroDirective>(MD)) {
-        // The latest visibility directive for a name in a submodule affects all
-        // the directives that come before it.
-        if (S == SubmoduleMacroState::None)
-          S = VisMD->isPublic() ? SubmoduleMacroState::Public
-                                : SubmoduleMacroState::Done;
-      } else {
-        S = SubmoduleMacroState::Done;
-        return MD;
-      }
-    }
-
-    return nullptr;
-  }
-
-  ArrayRef<SubmoduleID>
-  getOverriddenSubmodules(MacroDirective *MD,
-                          SmallVectorImpl<SubmoduleID> &ScratchSpace) {
-    assert(!isa<VisibilityMacroDirective>(MD) &&
-           "only #define and #undef can override");
-    if (MD->isImported())
-      return MD->getOverriddenModules();
-
-    ScratchSpace.clear();
-    SubmoduleID ModID = getSubmoduleID(MD);
-    for (MD = MD->getPrevious(); MD; MD = MD->getPrevious()) {
-      if (shouldIgnoreMacro(MD, IsModule, PP))
-        break;
-
-      // If this is a definition from a submodule import, that submodule's
-      // definition is overridden by the definition or undefinition that we
-      // started with.
-      if (MD->isImported()) {
-        if (auto *DefMD = dyn_cast<DefMacroDirective>(MD)) {
-          SubmoduleID DefModuleID = DefMD->getInfo()->getOwningModuleID();
-          assert(DefModuleID && "imported macro has no owning module");
-          ScratchSpace.push_back(DefModuleID);
-        } else if (auto *UndefMD = dyn_cast<UndefMacroDirective>(MD)) {
-          // If we override a #undef, we override anything that #undef overrides.
-          // We don't need to override it, since an active #undef doesn't affect
-          // the meaning of a macro.
-          auto Overrides = UndefMD->getOverriddenModules();
-          ScratchSpace.insert(ScratchSpace.end(),
-                              Overrides.begin(), Overrides.end());
-        }
-      }
-
-      // Stop once we leave the original macro's submodule.
-      //
-      // Either this submodule #included another submodule of the same
-      // module or it just happened to be built after the other module.
-      // In the former case, we override the submodule's macro.
-      //
-      // FIXME: In the latter case, we shouldn't do so, but we can't tell
-      // these cases apart.
-      //
-      // FIXME: We can leave this submodule and re-enter it if it #includes a
-      // header within a different submodule of the same module. In such cases
-      // the overrides list will be incomplete.
-      SubmoduleID DirectiveModuleID = getSubmoduleID(MD);
-      if (DirectiveModuleID != ModID) {
-        if (DirectiveModuleID && !MD->isImported())
-          ScratchSpace.push_back(DirectiveModuleID);
-        break;
-      }
-    }
-
-    std::sort(ScratchSpace.begin(), ScratchSpace.end());
-    ScratchSpace.erase(std::unique(ScratchSpace.begin(), ScratchSpace.end()),
-                       ScratchSpace.end());
-    return ScratchSpace;
-  }
-
-  SubmoduleID getSubmoduleID(MacroDirective *MD) {
-    return Writer.inferSubmoduleIDFromLocation(MD->getLocation());
   }
 
 public:
@@ -3344,9 +3129,9 @@ public:
   typedef unsigned hash_value_type;
   typedef unsigned offset_type;
 
-  ASTIdentifierTableTrait(ASTWriter &Writer, Preprocessor &PP, 
-                          IdentifierResolver &IdResolver, bool IsModule)
-    : Writer(Writer), PP(PP), IdResolver(IdResolver), IsModule(IsModule) { }
+  ASTIdentifierTableTrait(ASTWriter &Writer, Preprocessor &PP,
+                          IdentifierResolver &IdResolver)
+      : Writer(Writer), PP(PP), IdResolver(IdResolver) {}
 
   static hash_value_type ComputeHash(const IdentifierInfo* II) {
     return llvm::HashString(II->getName());
@@ -3356,25 +3141,12 @@ public:
   EmitKeyDataLength(raw_ostream& Out, IdentifierInfo* II, IdentID ID) {
     unsigned KeyLen = II->getLength() + 1;
     unsigned DataLen = 4; // 4 bytes for the persistent ID << 1
-    MacroDirective *Macro = nullptr;
-    if (isInterestingIdentifier(II, Macro)) {
+    auto MacroOffset = Writer.getMacroDirectivesOffset(II);
+    if (isInterestingIdentifier(II, MacroOffset)) {
       DataLen += 2; // 2 bytes for builtin ID
       DataLen += 2; // 2 bytes for flags
-      if (hadMacroDefinition(II, Macro)) {
+      if (MacroOffset)
         DataLen += 4; // MacroDirectives offset.
-        if (IsModule) {
-          MacroState State;
-          SmallVector<SubmoduleID, 16> Scratch;
-          for (MacroDirective *MD = getFirstPublicSubmoduleMacro(Macro, State);
-               MD; MD = getNextPublicSubmoduleMacro(MD, State)) {
-            DataLen += 4; // MacroInfo ID or ModuleID.
-            if (unsigned NumOverrides =
-                    getOverriddenSubmodules(MD, Scratch).size())
-              DataLen += 4 * (1 + NumOverrides);
-          }
-          DataLen += 4; // 0 terminator.
-        }
-      }
 
       for (IdentifierResolver::iterator D = IdResolver.begin(II),
                                      DEnd = IdResolver.end();
@@ -3401,25 +3173,13 @@ public:
     Out.write(II->getNameStart(), KeyLen);
   }
 
-  static void emitMacroOverrides(raw_ostream &Out,
-                                 ArrayRef<SubmoduleID> Overridden) {
-    if (!Overridden.empty()) {
-      using namespace llvm::support;
-      endian::Writer<little> LE(Out);
-      LE.write<uint32_t>(Overridden.size() | 0x80000000U);
-      for (unsigned I = 0, N = Overridden.size(); I != N; ++I) {
-        assert(Overridden[I] && "zero module ID for override");
-        LE.write<uint32_t>(Overridden[I]);
-      }
-    }
-  }
-
   void EmitData(raw_ostream& Out, IdentifierInfo* II,
                 IdentID ID, unsigned) {
     using namespace llvm::support;
     endian::Writer<little> LE(Out);
-    MacroDirective *Macro = nullptr;
-    if (!isInterestingIdentifier(II, Macro)) {
+
+    auto MacroOffset = Writer.getMacroDirectivesOffset(II);
+    if (!isInterestingIdentifier(II, MacroOffset)) {
       LE.write<uint32_t>(ID << 1);
       return;
     }
@@ -3429,43 +3189,16 @@ public:
     assert((Bits & 0xffff) == Bits && "ObjCOrBuiltinID too big for ASTReader.");
     LE.write<uint16_t>(Bits);
     Bits = 0;
-    bool HadMacroDefinition = hadMacroDefinition(II, Macro);
+    bool HadMacroDefinition = MacroOffset != 0;
     Bits = (Bits << 1) | unsigned(HadMacroDefinition);
-    Bits = (Bits << 1) | unsigned(IsModule);
     Bits = (Bits << 1) | unsigned(II->isExtensionToken());
     Bits = (Bits << 1) | unsigned(II->isPoisoned());
     Bits = (Bits << 1) | unsigned(II->hasRevertedTokenIDToIdentifier());
     Bits = (Bits << 1) | unsigned(II->isCPlusPlusOperatorKeyword());
     LE.write<uint16_t>(Bits);
 
-    if (HadMacroDefinition) {
-      LE.write<uint32_t>(Writer.getMacroDirectivesOffset(II));
-      if (IsModule) {
-        // Write the IDs of macros coming from different submodules.
-        MacroState State;
-        SmallVector<SubmoduleID, 16> Scratch;
-        for (MacroDirective *MD = getFirstPublicSubmoduleMacro(Macro, State);
-             MD; MD = getNextPublicSubmoduleMacro(MD, State)) {
-          if (DefMacroDirective *DefMD = dyn_cast<DefMacroDirective>(MD)) {
-            // FIXME: If this macro directive was created by #pragma pop_macros,
-            // or if it was created implicitly by resolving conflicting macros,
-            // it may be for a different submodule from the one in the MacroInfo
-            // object. If so, we should write out its owning ModuleID.
-            MacroID InfoID = Writer.getMacroID(DefMD->getInfo());
-            assert(InfoID);
-            LE.write<uint32_t>(InfoID << 1);
-          } else {
-            auto *UndefMD = cast<UndefMacroDirective>(MD);
-            SubmoduleID Mod = UndefMD->isImported()
-                                  ? UndefMD->getOwningModuleID()
-                                  : getSubmoduleID(UndefMD);
-            LE.write<uint32_t>((Mod << 1) | 1);
-          }
-          emitMacroOverrides(Out, getOverriddenSubmodules(MD, Scratch));
-        }
-        LE.write<uint32_t>((uint32_t)-1);
-      }
-    }
+    if (HadMacroDefinition)
+      LE.write<uint32_t>(MacroOffset);
 
     // Emit the declaration IDs in reverse order, because the
     // IdentifierResolver provides the declarations as they would be
@@ -3497,7 +3230,7 @@ void ASTWriter::WriteIdentifierTable(Preprocessor &PP,
   // strings.
   {
     llvm::OnDiskChainedHashTableGenerator<ASTIdentifierTableTrait> Generator;
-    ASTIdentifierTableTrait Trait(*this, PP, IdResolver, IsModule);
+    ASTIdentifierTableTrait Trait(*this, PP, IdResolver);
 
     // Look for any identifiers that were named while processing the
     // headers, but are otherwise not needed. We add these to the hash
@@ -3531,7 +3264,6 @@ void ASTWriter::WriteIdentifierTable(Preprocessor &PP,
     uint32_t BucketOffset;
     {
       using namespace llvm::support;
-      ASTIdentifierTableTrait Trait(*this, PP, IdResolver, IsModule);
       llvm::raw_svector_ostream Out(IdentifierTable);
       // Make sure that no bucket is at offset 0
       endian::Writer<little>(Out).write<uint32_t>(0);
@@ -3570,7 +3302,7 @@ void ASTWriter::WriteIdentifierTable(Preprocessor &PP,
   Record.push_back(IdentifierOffsets.size());
   Record.push_back(FirstIdentID - NUM_PREDEF_IDENT_IDS);
   Stream.EmitRecordWithBlob(IdentifierOffsetAbbrev, Record,
-                            data(IdentifierOffsets));
+                            bytes(IdentifierOffsets));
 }
 
 //===----------------------------------------------------------------------===//
@@ -3902,6 +3634,55 @@ ASTWriter::GenerateNameLookupTable(const DeclContext *ConstDC,
 /// bitstream, or 0 if no block was written.
 uint64_t ASTWriter::WriteDeclContextVisibleBlock(ASTContext &Context,
                                                  DeclContext *DC) {
+  // If we imported a key declaration of this namespace, write the visible
+  // lookup results as an update record for it rather than including them
+  // on this declaration. We will only look at key declarations on reload.
+  if (isa<NamespaceDecl>(DC) && Chain &&
+      Chain->getKeyDeclaration(cast<Decl>(DC))->isFromASTFile()) {
+    // Only do this once, for the first local declaration of the namespace.
+    for (NamespaceDecl *Prev = cast<NamespaceDecl>(DC)->getPreviousDecl(); Prev;
+         Prev = Prev->getPreviousDecl())
+      if (!Prev->isFromASTFile())
+        return 0;
+
+    // Note that we need to emit an update record for the primary context.
+    UpdatedDeclContexts.insert(DC->getPrimaryContext());
+
+    // Make sure all visible decls are written. They will be recorded later. We
+    // do this using a side data structure so we can sort the names into
+    // a deterministic order.
+    StoredDeclsMap *Map = DC->getPrimaryContext()->buildLookup();
+    SmallVector<std::pair<DeclarationName, DeclContext::lookup_result>, 16>
+        LookupResults;
+    if (Map) {
+      LookupResults.reserve(Map->size());
+      for (auto &Entry : *Map)
+        LookupResults.push_back(
+            std::make_pair(Entry.first, Entry.second.getLookupResult()));
+    }
+
+    std::sort(LookupResults.begin(), LookupResults.end(), llvm::less_first());
+    for (auto &NameAndResult : LookupResults) {
+      DeclarationName Name = NameAndResult.first;
+      DeclContext::lookup_result Result = NameAndResult.second;
+      if (Name.getNameKind() == DeclarationName::CXXConstructorName ||
+          Name.getNameKind() == DeclarationName::CXXConversionFunctionName) {
+        // We have to work around a name lookup bug here where negative lookup
+        // results for these names get cached in namespace lookup tables (these
+        // names should never be looked up in a namespace).
+        assert(Result.empty() && "Cannot have a constructor or conversion "
+                                 "function name in a namespace!");
+        continue;
+      }
+
+      for (NamedDecl *ND : Result)
+        if (!ND->isFromASTFile())
+          GetDeclRef(ND);
+    }
+
+    return 0;
+  }
+
   if (DC->getPrimaryContext() != DC)
     return 0;
 
@@ -3953,6 +3734,11 @@ void ASTWriter::WriteDeclContextVisibleUpdate(const DeclContext *DC) {
   SmallString<4096> LookupTable;
   uint32_t BucketOffset = GenerateNameLookupTable(DC, LookupTable);
 
+  // If we're updating a namespace, select a key declaration as the key for the
+  // update record; those are the only ones that will be checked on reload.
+  if (isa<NamespaceDecl>(DC))
+    DC = cast<DeclContext>(Chain->getKeyDeclaration(cast<Decl>(DC)));
+
   // Write the lookup table
   RecordData Record;
   Record.push_back(UPDATE_VISIBLE);
@@ -3985,11 +3771,17 @@ void ASTWriter::WriteRedeclarations() {
   SmallVector<serialization::LocalRedeclarationsInfo, 2> LocalRedeclsMap;
 
   for (unsigned I = 0, N = Redeclarations.size(); I != N; ++I) {
-    Decl *First = Redeclarations[I];
-    assert(First->isFirstDecl() && "Not the first declaration?");
-    
-    Decl *MostRecent = First->getMostRecentDecl();
-    
+    const Decl *Key = Redeclarations[I];
+    assert((Chain ? Chain->getKeyDeclaration(Key) == Key
+                  : Key->isFirstDecl()) &&
+           "not the key declaration");
+
+    const Decl *First = Key->getCanonicalDecl();
+    const Decl *MostRecent = First->getMostRecentDecl();
+
+    assert((getDeclID(First) >= NUM_PREDEF_DECL_IDS || First == Key) &&
+           "should not have imported key decls for predefined decl");
+
     // If we only have a single declaration, there is no point in storing
     // a redeclaration chain.
     if (First == MostRecent)
@@ -3998,34 +3790,34 @@ void ASTWriter::WriteRedeclarations() {
     unsigned Offset = LocalRedeclChains.size();
     unsigned Size = 0;
     LocalRedeclChains.push_back(0); // Placeholder for the size.
-    
+
     // Collect the set of local redeclarations of this declaration.
-    for (Decl *Prev = MostRecent; Prev != First;
+    for (const Decl *Prev = MostRecent; Prev;
          Prev = Prev->getPreviousDecl()) { 
-      if (!Prev->isFromASTFile()) {
+      if (!Prev->isFromASTFile() && Prev != Key) {
         AddDeclRef(Prev, LocalRedeclChains);
         ++Size;
       }
     }
 
     LocalRedeclChains[Offset] = Size;
-    
+
     // Reverse the set of local redeclarations, so that we store them in
     // order (since we found them in reverse order).
     std::reverse(LocalRedeclChains.end() - Size, LocalRedeclChains.end());
-    
+
     // Add the mapping from the first ID from the AST to the set of local
     // declarations.
-    LocalRedeclarationsInfo Info = { getDeclID(First), Offset };
+    LocalRedeclarationsInfo Info = { getDeclID(Key), Offset };
     LocalRedeclsMap.push_back(Info);
-    
+
     assert(N == Redeclarations.size() && 
            "Deserialized a declaration we shouldn't have");
   }
-  
+
   if (LocalRedeclChains.empty())
     return;
-  
+
   // Sort the local redeclarations map by the first declaration ID,
   // since the reader will be performing binary searches on this information.
   llvm::array_pod_sort(LocalRedeclsMap.begin(), LocalRedeclsMap.end());
@@ -4321,25 +4113,27 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   Preprocessor &PP = SemaRef.PP;
 
   // Set up predefined declaration IDs.
-  DeclIDs[Context.getTranslationUnitDecl()] = PREDEF_DECL_TRANSLATION_UNIT_ID;
-  if (Context.ObjCIdDecl)
-    DeclIDs[Context.ObjCIdDecl] = PREDEF_DECL_OBJC_ID_ID;
-  if (Context.ObjCSelDecl)
-    DeclIDs[Context.ObjCSelDecl] = PREDEF_DECL_OBJC_SEL_ID;
-  if (Context.ObjCClassDecl)
-    DeclIDs[Context.ObjCClassDecl] = PREDEF_DECL_OBJC_CLASS_ID;
-  if (Context.ObjCProtocolClassDecl)
-    DeclIDs[Context.ObjCProtocolClassDecl] = PREDEF_DECL_OBJC_PROTOCOL_ID;
-  if (Context.Int128Decl)
-    DeclIDs[Context.Int128Decl] = PREDEF_DECL_INT_128_ID;
-  if (Context.UInt128Decl)
-    DeclIDs[Context.UInt128Decl] = PREDEF_DECL_UNSIGNED_INT_128_ID;
-  if (Context.ObjCInstanceTypeDecl)
-    DeclIDs[Context.ObjCInstanceTypeDecl] = PREDEF_DECL_OBJC_INSTANCETYPE_ID;
-  if (Context.BuiltinVaListDecl)
-    DeclIDs[Context.getBuiltinVaListDecl()] = PREDEF_DECL_BUILTIN_VA_LIST_ID;
-  if (Context.ExternCContext)
-    DeclIDs[Context.ExternCContext] = PREDEF_DECL_EXTERN_C_CONTEXT_ID;
+  auto RegisterPredefDecl = [&] (Decl *D, PredefinedDeclIDs ID) {
+    if (D) {
+      assert(D->isCanonicalDecl() && "predefined decl is not canonical");
+      DeclIDs[D] = ID;
+      if (D->getMostRecentDecl() != D)
+        Redeclarations.push_back(D);
+    }
+  };
+  RegisterPredefDecl(Context.getTranslationUnitDecl(),
+                     PREDEF_DECL_TRANSLATION_UNIT_ID);
+  RegisterPredefDecl(Context.ObjCIdDecl, PREDEF_DECL_OBJC_ID_ID);
+  RegisterPredefDecl(Context.ObjCSelDecl, PREDEF_DECL_OBJC_SEL_ID);
+  RegisterPredefDecl(Context.ObjCClassDecl, PREDEF_DECL_OBJC_CLASS_ID);
+  RegisterPredefDecl(Context.ObjCProtocolClassDecl,
+                     PREDEF_DECL_OBJC_PROTOCOL_ID);
+  RegisterPredefDecl(Context.Int128Decl, PREDEF_DECL_INT_128_ID);
+  RegisterPredefDecl(Context.UInt128Decl, PREDEF_DECL_UNSIGNED_INT_128_ID);
+  RegisterPredefDecl(Context.ObjCInstanceTypeDecl,
+                     PREDEF_DECL_OBJC_INSTANCETYPE_ID);
+  RegisterPredefDecl(Context.BuiltinVaListDecl, PREDEF_DECL_BUILTIN_VA_LIST_ID);
+  RegisterPredefDecl(Context.ExternCContext, PREDEF_DECL_EXTERN_C_CONTEXT_ID);
 
   // Build a record containing all of the tentative definitions in this file, in
   // TentativeDefinitions order.  Generally, this record will be empty for
@@ -4435,6 +4229,20 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
     AddSourceLocation(I->second, UndefinedButUsed);
   }
 
+  // Build a record containing all delete-expressions that we would like to
+  // analyze later in AST.
+  RecordData DeleteExprsToAnalyze;
+
+  for (const auto &DeleteExprsInfo :
+       SemaRef.getMismatchingDeleteExpressions()) {
+    AddDeclRef(DeleteExprsInfo.first, DeleteExprsToAnalyze);
+    DeleteExprsToAnalyze.push_back(DeleteExprsInfo.second.size());
+    for (const auto &DeleteLoc : DeleteExprsInfo.second) {
+      AddSourceLocation(DeleteLoc.first, DeleteExprsToAnalyze);
+      DeleteExprsToAnalyze.push_back(DeleteLoc.second);
+    }
+  }
+
   // Write the control block
   WriteControlBlock(PP, Context, isysroot, OutputFile);
 
@@ -4464,7 +4272,7 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   Record.clear();
   Record.push_back(TU_UPDATE_LEXICAL);
   Stream.EmitRecordWithBlob(TuUpdateLexicalAbbrev, Record,
-                            data(NewGlobalDecls));
+                            bytes(NewGlobalDecls));
   
   // And a visible updates block for the translation unit.
   Abv = new llvm::BitCodeAbbrev();
@@ -4704,7 +4512,10 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   // Write the undefined internal functions and variables, and inline functions.
   if (!UndefinedButUsed.empty())
     Stream.EmitRecord(UNDEFINED_BUT_USED, UndefinedButUsed);
-  
+
+  if (!DeleteExprsToAnalyze.empty())
+    Stream.EmitRecord(DELETE_EXPRS_TO_ANALYZE, DeleteExprsToAnalyze);
+
   // Write the visible updates to DeclContexts.
   for (auto *DC : UpdatedDeclContexts)
     WriteDeclContextVisibleUpdate(DC);
@@ -4742,7 +4553,7 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
         // FIXME: If the module has macros imported then later has declarations
         // imported, this location won't be the right one as a location for the
         // declaration imports.
-        AddSourceLocation(Import.M->MacroVisibilityLoc, ImportedModules);
+        AddSourceLocation(PP.getModuleImportLoc(Import.M), ImportedModules);
       }
 
       Stream.EmitRecord(IMPORTED_MODULES, ImportedModules);
@@ -4878,7 +4689,11 @@ void ASTWriter::WriteDeclUpdatesBlocks(RecordDataImpl &OffsetsRecord) {
         break;
 
       case UPD_DECL_EXPORTED:
-        Record.push_back(inferSubmoduleIDFromLocation(Update.getLoc()));
+        Record.push_back(getSubmoduleID(Update.getModule()));
+        break;
+
+      case UPD_ADDED_ATTR_TO_RECORD:
+        WriteAttributes(llvm::makeArrayRef(Update.getAttr()), Record);
         break;
       }
     }
@@ -4977,8 +4792,7 @@ MacroID ASTWriter::getMacroID(MacroInfo *MI) {
 }
 
 uint64_t ASTWriter::getMacroDirectivesOffset(const IdentifierInfo *Name) {
-  assert(IdentMacroDirectivesOffsetMap[Name] && "not set!");
-  return IdentMacroDirectivesOffsetMap[Name];
+  return IdentMacroDirectivesOffsetMap.lookup(Name);
 }
 
 void ASTWriter::AddSelectorRef(const Selector SelRef, RecordDataImpl &Record) {
@@ -5830,7 +5644,7 @@ void ASTWriter::SelectorRead(SelectorID ID, Selector S) {
 }
 
 void ASTWriter::MacroDefinitionRead(serialization::PreprocessedEntityID ID,
-                                    MacroDefinition *MD) {
+                                    MacroDefinitionRecord *MD) {
   assert(MacroDefinitions.find(MD) == MacroDefinitions.end());
   MacroDefinitions[MD] = ID;
 }
@@ -5923,7 +5737,7 @@ void ASTWriter::AddedCXXTemplateSpecialization(const FunctionTemplateDecl *TD,
 void ASTWriter::ResolvedExceptionSpec(const FunctionDecl *FD) {
   assert(!DoneWritingDeclsAndTypes && "Already done writing updates!");
   if (!Chain) return;
-  Chain->forEachFormerlyCanonicalImportedDecl(FD, [&](const Decl *D) {
+  Chain->forEachImportedKeyDecl(FD, [&](const Decl *D) {
     // If we don't already know the exception specification for this redecl
     // chain, add an update record for it.
     if (isUnresolvedExceptionSpec(cast<FunctionDecl>(D)
@@ -5937,7 +5751,7 @@ void ASTWriter::ResolvedExceptionSpec(const FunctionDecl *FD) {
 void ASTWriter::DeducedReturnType(const FunctionDecl *FD, QualType ReturnType) {
   assert(!WritingAST && "Already writing the AST!");
   if (!Chain) return;
-  Chain->forEachFormerlyCanonicalImportedDecl(FD, [&](const Decl *D) {
+  Chain->forEachImportedKeyDecl(FD, [&](const Decl *D) {
     DeclUpdates[D].push_back(
         DeclUpdate(UPD_CXX_DEDUCED_RETURN_TYPE, ReturnType));
   });
@@ -5948,7 +5762,7 @@ void ASTWriter::ResolvedOperatorDelete(const CXXDestructorDecl *DD,
   assert(!WritingAST && "Already writing the AST!");
   assert(Delete && "Not given an operator delete");
   if (!Chain) return;
-  Chain->forEachFormerlyCanonicalImportedDecl(DD, [&](const Decl *D) {
+  Chain->forEachImportedKeyDecl(DD, [&](const Decl *D) {
     DeclUpdates[D].push_back(DeclUpdate(UPD_CXX_RESOLVED_DTOR_DELETE, Delete));
   });
 }
@@ -6024,10 +5838,16 @@ void ASTWriter::DeclarationMarkedOpenMPThreadPrivate(const Decl *D) {
   DeclUpdates[D].push_back(DeclUpdate(UPD_DECL_MARKED_OPENMP_THREADPRIVATE));
 }
 
-void ASTWriter::RedefinedHiddenDefinition(const NamedDecl *D,
-                                          SourceLocation Loc) {
+void ASTWriter::RedefinedHiddenDefinition(const NamedDecl *D, Module *M) {
   assert(!WritingAST && "Already writing the AST!");
   assert(D->isHidden() && "expected a hidden declaration");
-  assert(D->isFromASTFile() && "hidden decl not from AST file");
-  DeclUpdates[D].push_back(DeclUpdate(UPD_DECL_EXPORTED, Loc));
+  DeclUpdates[D].push_back(DeclUpdate(UPD_DECL_EXPORTED, M));
+}
+
+void ASTWriter::AddedAttributeToRecord(const Attr *Attr,
+                                       const RecordDecl *Record) {
+  assert(!WritingAST && "Already writing the AST!");
+  if (!Record->isFromASTFile())
+    return;
+  DeclUpdates[Record].push_back(DeclUpdate(UPD_ADDED_ATTR_TO_RECORD, Attr));
 }

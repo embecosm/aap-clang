@@ -638,11 +638,28 @@ def warn_non_modular_include_in_framework_module : Warning<
 def warn_non_modular_include_in_module : Warning<
   "include of non-modular header inside module '%0'">,
   InGroup<NonModularIncludeInModule>, DefaultIgnore;
-
+def warn_module_conflict : Warning<
+  "module '%0' conflicts with already-imported module '%1': %2">, 
+  InGroup<ModuleConflict>;
 
 def warn_header_guard : Warning<
   "%0 is used as a header guard here, followed by #define of a different macro">,
   InGroup<DiagGroup<"header-guard">>;
 def note_header_guard : Note<
-  "%0 is defined here; did you mean %1?">;  
+  "%0 is defined here; did you mean %1?">;
+
+let CategoryName = "Nullability Issue" in {
+
+def err_pp_assume_nonnull_syntax : Error<"expected 'begin' or 'end'">;
+def err_pp_double_begin_of_assume_nonnull : Error<
+  "already inside '#pragma clang assume_nonnull'">;
+def err_pp_unmatched_end_of_assume_nonnull : Error<
+  "not currently inside '#pragma clang assume_nonnull'">;
+def err_pp_include_in_assume_nonnull : Error<
+  "cannot #include files inside '#pragma clang assume_nonnull'">;
+def err_pp_eof_in_assume_nonnull : Error<
+  "'#pragma clang assume_nonnull' was not ended within this file">;
+
+}
+
 }
