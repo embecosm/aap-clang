@@ -2487,8 +2487,9 @@ static bool areOptimizationsEnabled(const ArgList &Args) {
 
 static bool shouldUseFramePointerForTarget(const ArgList &Args,
                                            const llvm::Triple &Triple) {
-  // XCore never wants frame pointers, regardless of OS.
-  if (Triple.getArch() == llvm::Triple::xcore) {
+  // XCore and AAP never want frame pointers, regardless of OS.
+  if ((Triple.getArch() == llvm::Triple::aap) ||
+      (Triple.getArch() == llvm::Triple::xcore)) {
     return false;
   }
 
