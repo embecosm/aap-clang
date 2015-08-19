@@ -225,7 +225,8 @@ bool ContinuationIndenter::mustBreak(const LineState &State) {
   }
 
   // If the return type spans multiple lines, wrap before the function name.
-  if (Current.isOneOf(TT_FunctionDeclarationName, tok::kw_operator) &&
+  if ((Current.is(TT_FunctionDeclarationName) ||
+       (Current.is(tok::kw_operator) && !Previous.is(tok::coloncolon))) &&
       State.Stack.back().BreakBeforeParameter)
     return true;
 
@@ -678,8 +679,13 @@ unsigned ContinuationIndenter::moveStateToNextToken(LineState &State,
   if (Current.isMemberAccess())
     State.Stack.back().StartOfFunctionCall =
         Current.LastOperator ? 0 : State.Column;
-  if (Current.is(TT_SelectorName))
+  if (Current.is(TT_SelectorName)) {
     State.Stack.back().ObjCSelectorNameFound = true;
+    if (Style.IndentWrappedFunctionNames) {
+      State.Stack.back().Indent =
+          State.FirstIndent + Style.ContinuationIndentWidth;
+    }
+  }
   if (Current.is(TT_CtorInitializerColon)) {
     // Indent 2 from the column, so:
     // SomeClass::SomeClass()

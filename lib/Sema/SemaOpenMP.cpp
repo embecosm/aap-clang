@@ -120,6 +120,7 @@ private:
   /// from current directive.
   OpenMPClauseKind ClauseKindMode;
   Sema &SemaRef;
+  bool ForceCapturing;
 
   typedef SmallVector<SharingMapTy, 8>::reverse_iterator reverse_iterator;
 
@@ -130,10 +131,14 @@ private:
 
 public:
   explicit DSAStackTy(Sema &S)
-      : Stack(1), ClauseKindMode(OMPC_unknown), SemaRef(S) {}
+      : Stack(1), ClauseKindMode(OMPC_unknown), SemaRef(S),
+        ForceCapturing(false) {}
 
   bool isClauseParsingMode() const { return ClauseKindMode != OMPC_unknown; }
   void setClauseParsingMode(OpenMPClauseKind K) { ClauseKindMode = K; }
+
+  bool isForceVarCapturing() const { return ForceCapturing; }
+  void setForceVarCapturing(bool V) { ForceCapturing = V; }
 
   void push(OpenMPDirectiveKind DKind, const DeclarationNameInfo &DirName,
             Scope *CurScope, SourceLocation Loc) {
@@ -655,7 +660,8 @@ bool Sema::IsOpenMPCapturedVar(VarDecl *VD) {
   if (DSAStack->getCurrentDirective() != OMPD_unknown) {
     if (DSAStack->isLoopControlVariable(VD) ||
         (VD->hasLocalStorage() &&
-         isParallelOrTaskRegion(DSAStack->getCurrentDirective())))
+         isParallelOrTaskRegion(DSAStack->getCurrentDirective())) ||
+        DSAStack->isForceVarCapturing())
       return true;
     auto DVarPrivate = DSAStack->getTopDSA(VD, DSAStack->isClauseParsingMode());
     if (DVarPrivate.CKind != OMPC_unknown && isOpenMPPrivate(DVarPrivate.CKind))
@@ -1300,6 +1306,7 @@ void Sema::ActOnOpenMPRegionStart(OpenMPDirectiveKind DKind, Scope *CurScope) {
                              Params);
     break;
   }
+  case OMPD_target_data:
   case OMPD_target: {
     Sema::CapturedParamNameType Params[] = {
         std::make_pair(StringRef(), QualType()) // __context with shared vars
@@ -1350,13 +1357,18 @@ StmtResult Sema::ActOnOpenMPRegionEnd(StmtResult S,
   // This is required for proper codegen.
   for (auto *Clause : Clauses) {
     if (isOpenMPPrivate(Clause->getClauseKind()) ||
-        Clause->getClauseKind() == OMPC_copyprivate) {
+        Clause->getClauseKind() == OMPC_copyprivate ||
+        (getLangOpts().OpenMPUseTLS &&
+         getASTContext().getTargetInfo().isTLSSupported() &&
+         Clause->getClauseKind() == OMPC_copyin)) {
+      DSAStack->setForceVarCapturing(Clause->getClauseKind() == OMPC_copyin);
       // Mark all variables in private list clauses as used in inner region.
       for (auto *VarRef : Clause->children()) {
         if (auto *E = cast_or_null<Expr>(VarRef)) {
           MarkDeclarationsReferencedInExpr(E);
         }
       }
+      DSAStack->setForceVarCapturing(/*V=*/false);
     } else if (isParallelOrTaskRegion(DSAStack->getCurrentDirective()) &&
                Clause->getClauseKind() == OMPC_schedule) {
       // Mark all variables in private list clauses as used in inner region.
@@ -2124,6 +2136,10 @@ StmtResult Sema::ActOnOpenMPExecutableDirective(
            "No associated statement allowed for 'omp cancel' directive");
     Res = ActOnOpenMPCancelDirective(StartLoc, EndLoc, CancelRegion);
     break;
+  case OMPD_target_data:
+    Res = ActOnOpenMPTargetDataDirective(ClausesWithImplicit, AStmt, StartLoc,
+                                         EndLoc);
+    break;
   case OMPD_threadprivate:
     llvm_unreachable("OpenMP Directive is not allowed");
   case OMPD_unknown:
@@ -2262,6 +2278,22 @@ bool OpenMPIterationSpaceChecker::Dependent() const {
          (UB && UB->isValueDependent()) || (Step && Step->isValueDependent());
 }
 
+template <typename T>
+static T *getExprAsWritten(T *E) {
+  if (auto *ExprTemp = dyn_cast<ExprWithCleanups>(E))
+    E = ExprTemp->getSubExpr();
+
+  if (auto *MTE = dyn_cast<MaterializeTemporaryExpr>(E))
+    E = MTE->GetTemporaryExpr();
+
+  while (auto *Binder = dyn_cast<CXXBindTemporaryExpr>(E))
+    E = Binder->getSubExpr();
+
+  if (auto *ICE = dyn_cast<ImplicitCastExpr>(E))
+    E = ICE->getSubExprAsWritten();
+  return E->IgnoreParens();
+}
+
 bool OpenMPIterationSpaceChecker::SetVarAndLB(VarDecl *NewVar,
                                               DeclRefExpr *NewVarRefExpr,
                                               Expr *NewLB) {
@@ -2272,6 +2304,12 @@ bool OpenMPIterationSpaceChecker::SetVarAndLB(VarDecl *NewVar,
     return true;
   Var = NewVar;
   VarRef = NewVarRefExpr;
+  if (auto *CE = dyn_cast_or_null<CXXConstructExpr>(NewLB))
+    if (const CXXConstructorDecl *Ctor = CE->getConstructor())
+      if ((Ctor->isCopyOrMoveConstructor() ||
+           Ctor->isConvertingConstructor(/*AllowExplicit=*/false)) &&
+          CE->getNumArgs() > 0 && CE->getArg(0) != nullptr)
+        NewLB = CE->getArg(0)->IgnoreParenImpCasts();
   LB = NewLB;
   return false;
 }
@@ -2402,11 +2440,12 @@ bool OpenMPIterationSpaceChecker::CheckInit(Stmt *S, bool EmitDiags) {
 static const VarDecl *GetInitVarDecl(const Expr *E) {
   if (!E)
     return nullptr;
-  E = E->IgnoreParenImpCasts();
+  E = getExprAsWritten(E);
   if (auto *CE = dyn_cast_or_null<CXXConstructExpr>(E))
     if (const CXXConstructorDecl *Ctor = CE->getConstructor())
-      if (Ctor->isCopyConstructor() && CE->getNumArgs() == 1 &&
-          CE->getArg(0) != nullptr)
+      if ((Ctor->isCopyOrMoveConstructor() ||
+           Ctor->isConvertingConstructor(/*AllowExplicit=*/false)) &&
+          CE->getNumArgs() > 0 && CE->getArg(0) != nullptr)
         E = CE->getArg(0)->IgnoreParenImpCasts();
   auto DRE = dyn_cast_or_null<DeclRefExpr>(E);
   if (!DRE)
@@ -2425,7 +2464,7 @@ bool OpenMPIterationSpaceChecker::CheckCond(Expr *S) {
     SemaRef.Diag(DefaultLoc, diag::err_omp_loop_not_canonical_cond) << Var;
     return true;
   }
-  S = S->IgnoreParenImpCasts();
+  S = getExprAsWritten(S);
   SourceLocation CondLoc = S->getLocStart();
   if (auto BO = dyn_cast<BinaryOperator>(S)) {
     if (BO->isRelationalOp()) {
@@ -2646,6 +2685,11 @@ Expr *OpenMPIterationSpaceChecker::BuildPreCond(Scope *S, Expr *Cond) const {
       S, DefaultLoc, TestIsLessOp ? (TestIsStrictOp ? BO_LT : BO_LE)
                                   : (TestIsStrictOp ? BO_GT : BO_GE),
       LB, UB);
+  if (CondExpr.isUsable()) {
+    CondExpr = SemaRef.PerformImplicitConversion(
+        CondExpr.get(), SemaRef.Context.BoolTy, /*Action=*/Sema::AA_Casting,
+        /*AllowExplicit=*/true);
+  }
   SemaRef.getDiagnostics().setSuppressAllDiagnostics(Suppress);
   // Otherwise use original loop conditon and evaluate it in runtime.
   return CondExpr.isUsable() ? CondExpr.get() : Cond;
@@ -2707,7 +2751,7 @@ void Sema::ActOnOpenMPLoopInitialization(SourceLocation ForLoc, Stmt *Init) {
 static bool CheckOpenMPIterationSpace(
     OpenMPDirectiveKind DKind, Stmt *S, Sema &SemaRef, DSAStackTy &DSA,
     unsigned CurrentNestedLoopCount, unsigned NestedLoopCount,
-    Expr *NestedLoopCountExpr,
+    Expr *CollapseLoopCountExpr, Expr *OrderedLoopCountExpr,
     llvm::DenseMap<VarDecl *, Expr *> &VarsWithImplicitDSA,
     LoopIterationSpace &ResultIterSpace) {
   // OpenMP [2.6, Canonical Loop Form]
@@ -2715,13 +2759,24 @@ static bool CheckOpenMPIterationSpace(
   auto For = dyn_cast_or_null<ForStmt>(S);
   if (!For) {
     SemaRef.Diag(S->getLocStart(), diag::err_omp_not_for)
-        << (NestedLoopCountExpr != nullptr) << getOpenMPDirectiveName(DKind)
-        << NestedLoopCount << (CurrentNestedLoopCount > 0)
-        << CurrentNestedLoopCount;
-    if (NestedLoopCount > 1)
-      SemaRef.Diag(NestedLoopCountExpr->getExprLoc(),
-                   diag::note_omp_collapse_expr)
-          << NestedLoopCountExpr->getSourceRange();
+        << (CollapseLoopCountExpr != nullptr || OrderedLoopCountExpr != nullptr)
+        << getOpenMPDirectiveName(DKind) << NestedLoopCount
+        << (CurrentNestedLoopCount > 0) << CurrentNestedLoopCount;
+    if (NestedLoopCount > 1) {
+      if (CollapseLoopCountExpr && OrderedLoopCountExpr)
+        SemaRef.Diag(DSA.getConstructLoc(),
+                     diag::note_omp_collapse_ordered_expr)
+            << 2 << CollapseLoopCountExpr->getSourceRange()
+            << OrderedLoopCountExpr->getSourceRange();
+      else if (CollapseLoopCountExpr)
+        SemaRef.Diag(CollapseLoopCountExpr->getExprLoc(),
+                     diag::note_omp_collapse_ordered_expr)
+            << 0 << CollapseLoopCountExpr->getSourceRange();
+      else
+        SemaRef.Diag(OrderedLoopCountExpr->getExprLoc(),
+                     diag::note_omp_collapse_ordered_expr)
+            << 1 << OrderedLoopCountExpr->getSourceRange();
+    }
     return true;
   }
   assert(For->getBody());
@@ -2796,7 +2851,8 @@ static bool CheckOpenMPIterationSpace(
   } else if (LoopVarRefExpr != nullptr) {
     // Make the loop iteration variable private (for worksharing constructs),
     // linear (for simd directives with the only one associated loop) or
-    // lastprivate (for simd directives with several collapsed loops).
+    // lastprivate (for simd directives with several collapsed or ordered
+    // loops).
     if (DVar.CKind == OMPC_unknown)
       DVar = DSA.hasDSA(Var, isOpenMPPrivate, MatchesAlways(),
                         /*FromParent=*/false);
@@ -2898,16 +2954,23 @@ static bool FitsInto(unsigned Bits, bool Signed, Expr *E, Sema &SemaRef) {
 /// \return Returns 0 if one of the collapsed stmts is not canonical for loop,
 /// number of collapsed loops otherwise.
 static unsigned
-CheckOpenMPLoop(OpenMPDirectiveKind DKind, Expr *NestedLoopCountExpr,
-                Stmt *AStmt, Sema &SemaRef, DSAStackTy &DSA,
+CheckOpenMPLoop(OpenMPDirectiveKind DKind, Expr *CollapseLoopCountExpr,
+                Expr *OrderedLoopCountExpr, Stmt *AStmt, Sema &SemaRef,
+                DSAStackTy &DSA,
                 llvm::DenseMap<VarDecl *, Expr *> &VarsWithImplicitDSA,
                 OMPLoopDirective::HelperExprs &Built) {
   unsigned NestedLoopCount = 1;
-  if (NestedLoopCountExpr) {
+  if (CollapseLoopCountExpr) {
     // Found 'collapse' clause - calculate collapse number.
     llvm::APSInt Result;
-    if (NestedLoopCountExpr->EvaluateAsInt(Result, SemaRef.getASTContext()))
-      NestedLoopCount = Result.getLimitedValue();
+    if (CollapseLoopCountExpr->EvaluateAsInt(Result, SemaRef.getASTContext()))
+      NestedLoopCount += Result.getLimitedValue() - 1;
+  }
+  if (OrderedLoopCountExpr) {
+    // Found 'ordered' clause - calculate collapse number.
+    llvm::APSInt Result;
+    if (OrderedLoopCountExpr->EvaluateAsInt(Result, SemaRef.getASTContext()))
+      NestedLoopCount += Result.getLimitedValue() - 1;
   }
   // This is helper routine for loop directives (e.g., 'for', 'simd',
   // 'for simd', etc.).
@@ -2916,8 +2979,9 @@ CheckOpenMPLoop(OpenMPDirectiveKind DKind, Expr *NestedLoopCountExpr,
   Stmt *CurStmt = AStmt->IgnoreContainers(/* IgnoreCaptured */ true);
   for (unsigned Cnt = 0; Cnt < NestedLoopCount; ++Cnt) {
     if (CheckOpenMPIterationSpace(DKind, CurStmt, SemaRef, DSA, Cnt,
-                                  NestedLoopCount, NestedLoopCountExpr,
-                                  VarsWithImplicitDSA, IterSpaces[Cnt]))
+                                  NestedLoopCount, CollapseLoopCountExpr,
+                                  OrderedLoopCountExpr, VarsWithImplicitDSA,
+                                  IterSpaces[Cnt]))
       return 0;
     // Move on to the next nested for loop, or to the loop body.
     // OpenMP [2.8.1, simd construct, Restrictions]
@@ -2934,11 +2998,12 @@ CheckOpenMPLoop(OpenMPDirectiveKind DKind, Expr *NestedLoopCountExpr,
 
   // An example of what is generated for the following code:
   //
-  //   #pragma omp simd collapse(2)
+  //   #pragma omp simd collapse(2) ordered(2)
   //   for (i = 0; i < NI; ++i)
-  //     for (j = J0; j < NJ; j+=2) {
-  //     <loop body>
-  //   }
+  //     for (k = 0; k < NK; ++k)
+  //       for (j = J0; j < NJ; j+=2) {
+  //         <loop body>
+  //       }
   //
   // We generate the code below.
   // Note: the loop body may be outlined in CodeGen.
@@ -3231,7 +3296,8 @@ CheckOpenMPLoop(OpenMPDirectiveKind DKind, Expr *NestedLoopCountExpr,
   Built.IterationVarRef = IV.get();
   Built.LastIteration = LastIteration.get();
   Built.NumIterations = NumIterations.get();
-  Built.CalcLastIteration = CalcLastIteration.get();
+  Built.CalcLastIteration =
+      SemaRef.ActOnFinishFullExpr(CalcLastIteration.get()).get();
   Built.PreCond = PreCond.get();
   Built.Cond = Cond.get();
   Built.Init = Init.get();
@@ -3247,7 +3313,7 @@ CheckOpenMPLoop(OpenMPDirectiveKind DKind, Expr *NestedLoopCountExpr,
   return NestedLoopCount;
 }
 
-static Expr *GetCollapseNumberExpr(ArrayRef<OMPClause *> Clauses) {
+static Expr *getCollapseNumberExpr(ArrayRef<OMPClause *> Clauses) {
   auto &&CollapseFilter = [](const OMPClause *C) -> bool {
     return C->getClauseKind() == OMPC_collapse;
   };
@@ -3258,15 +3324,27 @@ static Expr *GetCollapseNumberExpr(ArrayRef<OMPClause *> Clauses) {
   return nullptr;
 }
 
+static Expr *getOrderedNumberExpr(ArrayRef<OMPClause *> Clauses) {
+  auto &&OrderedFilter = [](const OMPClause *C) -> bool {
+    return C->getClauseKind() == OMPC_ordered;
+  };
+  OMPExecutableDirective::filtered_clause_iterator<decltype(OrderedFilter)> I(
+      Clauses, std::move(OrderedFilter));
+  if (I)
+    return cast<OMPOrderedClause>(*I)->getNumForLoops();
+  return nullptr;
+}
+
 StmtResult Sema::ActOnOpenMPSimdDirective(
     ArrayRef<OMPClause *> Clauses, Stmt *AStmt, SourceLocation StartLoc,
     SourceLocation EndLoc,
     llvm::DenseMap<VarDecl *, Expr *> &VarsWithImplicitDSA) {
   OMPLoopDirective::HelperExprs B;
-  // In presence of clause 'collapse', it will define the nested loops number.
-  unsigned NestedLoopCount =
-      CheckOpenMPLoop(OMPD_simd, GetCollapseNumberExpr(Clauses), AStmt, *this,
-                      *DSAStack, VarsWithImplicitDSA, B);
+  // In presence of clause 'collapse' or 'ordered' with number of loops, it will
+  // define the nested loops number.
+  unsigned NestedLoopCount = CheckOpenMPLoop(
+      OMPD_simd, getCollapseNumberExpr(Clauses), getOrderedNumberExpr(Clauses),
+      AStmt, *this, *DSAStack, VarsWithImplicitDSA, B);
   if (NestedLoopCount == 0)
     return StmtError();
 
@@ -3293,10 +3371,11 @@ StmtResult Sema::ActOnOpenMPForDirective(
     SourceLocation EndLoc,
     llvm::DenseMap<VarDecl *, Expr *> &VarsWithImplicitDSA) {
   OMPLoopDirective::HelperExprs B;
-  // In presence of clause 'collapse', it will define the nested loops number.
-  unsigned NestedLoopCount =
-      CheckOpenMPLoop(OMPD_for, GetCollapseNumberExpr(Clauses), AStmt, *this,
-                      *DSAStack, VarsWithImplicitDSA, B);
+  // In presence of clause 'collapse' or 'ordered' with number of loops, it will
+  // define the nested loops number.
+  unsigned NestedLoopCount = CheckOpenMPLoop(
+      OMPD_for, getCollapseNumberExpr(Clauses), getOrderedNumberExpr(Clauses),
+      AStmt, *this, *DSAStack, VarsWithImplicitDSA, B);
   if (NestedLoopCount == 0)
     return StmtError();
 
@@ -3313,10 +3392,12 @@ StmtResult Sema::ActOnOpenMPForSimdDirective(
     SourceLocation EndLoc,
     llvm::DenseMap<VarDecl *, Expr *> &VarsWithImplicitDSA) {
   OMPLoopDirective::HelperExprs B;
-  // In presence of clause 'collapse', it will define the nested loops number.
+  // In presence of clause 'collapse' or 'ordered' with number of loops, it will
+  // define the nested loops number.
   unsigned NestedLoopCount =
-      CheckOpenMPLoop(OMPD_for_simd, GetCollapseNumberExpr(Clauses), AStmt,
-                      *this, *DSAStack, VarsWithImplicitDSA, B);
+      CheckOpenMPLoop(OMPD_for_simd, getCollapseNumberExpr(Clauses),
+                      getOrderedNumberExpr(Clauses), AStmt, *this, *DSAStack,
+                      VarsWithImplicitDSA, B);
   if (NestedLoopCount == 0)
     return StmtError();
 
@@ -3348,11 +3429,11 @@ StmtResult Sema::ActOnOpenMPSectionsDirective(ArrayRef<OMPClause *> Clauses,
     BaseStmt = CS->getCapturedStmt();
   if (auto C = dyn_cast_or_null<CompoundStmt>(BaseStmt)) {
     auto S = C->children();
-    if (!S)
+    if (S.begin() == S.end())
       return StmtError();
     // All associated statements must be '#pragma omp section' except for
     // the first one.
-    for (Stmt *SectionStmt : ++S) {
+    for (Stmt *SectionStmt : llvm::make_range(std::next(S.begin()), S.end())) {
       if (!SectionStmt || !isa<OMPSectionDirective>(SectionStmt)) {
         if (SectionStmt)
           Diag(SectionStmt->getLocStart(),
@@ -3445,10 +3526,12 @@ StmtResult Sema::ActOnOpenMPParallelForDirective(
   CS->getCapturedDecl()->setNothrow();
 
   OMPLoopDirective::HelperExprs B;
-  // In presence of clause 'collapse', it will define the nested loops number.
+  // In presence of clause 'collapse' or 'ordered' with number of loops, it will
+  // define the nested loops number.
   unsigned NestedLoopCount =
-      CheckOpenMPLoop(OMPD_parallel_for, GetCollapseNumberExpr(Clauses), AStmt,
-                      *this, *DSAStack, VarsWithImplicitDSA, B);
+      CheckOpenMPLoop(OMPD_parallel_for, getCollapseNumberExpr(Clauses),
+                      getOrderedNumberExpr(Clauses), AStmt, *this, *DSAStack,
+                      VarsWithImplicitDSA, B);
   if (NestedLoopCount == 0)
     return StmtError();
 
@@ -3474,10 +3557,12 @@ StmtResult Sema::ActOnOpenMPParallelForSimdDirective(
   CS->getCapturedDecl()->setNothrow();
 
   OMPLoopDirective::HelperExprs B;
-  // In presence of clause 'collapse', it will define the nested loops number.
+  // In presence of clause 'collapse' or 'ordered' with number of loops, it will
+  // define the nested loops number.
   unsigned NestedLoopCount =
-      CheckOpenMPLoop(OMPD_parallel_for_simd, GetCollapseNumberExpr(Clauses),
-                      AStmt, *this, *DSAStack, VarsWithImplicitDSA, B);
+      CheckOpenMPLoop(OMPD_parallel_for_simd, getCollapseNumberExpr(Clauses),
+                      getOrderedNumberExpr(Clauses), AStmt, *this, *DSAStack,
+                      VarsWithImplicitDSA, B);
   if (NestedLoopCount == 0)
     return StmtError();
 
@@ -3506,11 +3591,11 @@ Sema::ActOnOpenMPParallelSectionsDirective(ArrayRef<OMPClause *> Clauses,
     BaseStmt = CS->getCapturedStmt();
   if (auto C = dyn_cast_or_null<CompoundStmt>(BaseStmt)) {
     auto S = C->children();
-    if (!S)
+    if (S.begin() == S.end())
       return StmtError();
     // All associated statements must be '#pragma omp section' except for
     // the first one.
-    for (Stmt *SectionStmt : ++S) {
+    for (Stmt *SectionStmt : llvm::make_range(std::next(S.begin()), S.end())) {
       if (!SectionStmt || !isa<OMPSectionDirective>(SectionStmt)) {
         if (SectionStmt)
           Diag(SectionStmt->getLocStart(),
@@ -4291,6 +4376,16 @@ StmtResult Sema::ActOnOpenMPTargetDirective(ArrayRef<OMPClause *> Clauses,
   return OMPTargetDirective::Create(Context, StartLoc, EndLoc, Clauses, AStmt);
 }
 
+StmtResult Sema::ActOnOpenMPTargetDataDirective(ArrayRef<OMPClause *> Clauses,
+                                                Stmt *AStmt,
+                                                SourceLocation StartLoc,
+                                                SourceLocation EndLoc) {
+  getCurFunction()->setHasBranchProtectedScope();
+
+  return OMPTargetDataDirective::Create(Context, StartLoc, EndLoc, Clauses,
+                                        AStmt);
+}
+
 StmtResult Sema::ActOnOpenMPTeamsDirective(ArrayRef<OMPClause *> Clauses,
                                            Stmt *AStmt, SourceLocation StartLoc,
                                            SourceLocation EndLoc) {
@@ -4371,6 +4466,9 @@ OMPClause *Sema::ActOnOpenMPSingleExprClause(OpenMPClauseKind Kind, Expr *Expr,
   case OMPC_collapse:
     Res = ActOnOpenMPCollapseClause(Expr, StartLoc, LParenLoc, EndLoc);
     break;
+  case OMPC_ordered:
+    Res = ActOnOpenMPOrderedClause(StartLoc, EndLoc, LParenLoc, Expr);
+    break;
   case OMPC_default:
   case OMPC_proc_bind:
   case OMPC_schedule:
@@ -4383,7 +4481,6 @@ OMPClause *Sema::ActOnOpenMPSingleExprClause(OpenMPClauseKind Kind, Expr *Expr,
   case OMPC_aligned:
   case OMPC_copyin:
   case OMPC_copyprivate:
-  case OMPC_ordered:
   case OMPC_nowait:
   case OMPC_untied:
   case OMPC_mergeable:
@@ -4533,7 +4630,11 @@ ExprResult Sema::VerifyPositiveIntegerConstantInClause(Expr *E,
     return ExprError();
   }
   if (CKind == OMPC_collapse) {
-    DSAStack->setCollapseNumber(Result.getExtValue());
+    DSAStack->setCollapseNumber(DSAStack->getCollapseNumber() - 1 +
+                                Result.getExtValue());
+  } else if (CKind == OMPC_ordered) {
+    DSAStack->setCollapseNumber(DSAStack->getCollapseNumber() - 1 +
+                                Result.getExtValue());
   }
   return ICE;
 }
@@ -4566,6 +4667,27 @@ OMPClause *Sema::ActOnOpenMPCollapseClause(Expr *NumForLoops,
     return nullptr;
   return new (Context)
       OMPCollapseClause(NumForLoopsResult.get(), StartLoc, LParenLoc, EndLoc);
+}
+
+OMPClause *Sema::ActOnOpenMPOrderedClause(SourceLocation StartLoc,
+                                          SourceLocation EndLoc,
+                                          SourceLocation LParenLoc,
+                                          Expr *NumForLoops) {
+  DSAStack->setOrderedRegion();
+  // OpenMP [2.7.1, loop construct, Description]
+  // OpenMP [2.8.1, simd construct, Description]
+  // OpenMP [2.9.6, distribute construct, Description]
+  // The parameter of the ordered clause must be a constant
+  // positive integer expression if any.
+  if (NumForLoops && LParenLoc.isValid()) {
+    ExprResult NumForLoopsResult =
+        VerifyPositiveIntegerConstantInClause(NumForLoops, OMPC_ordered);
+    if (NumForLoopsResult.isInvalid())
+      return nullptr;
+    NumForLoops = NumForLoopsResult.get();
+  }
+  return new (Context)
+      OMPOrderedClause(NumForLoops, StartLoc, LParenLoc, EndLoc);
 }
 
 OMPClause *Sema::ActOnOpenMPSimpleClause(
@@ -4858,12 +4980,6 @@ OMPClause *Sema::ActOnOpenMPClause(OpenMPClauseKind Kind,
     llvm_unreachable("Clause is not allowed.");
   }
   return Res;
-}
-
-OMPClause *Sema::ActOnOpenMPOrderedClause(SourceLocation StartLoc,
-                                          SourceLocation EndLoc) {
-  DSAStack->setOrderedRegion();
-  return new (Context) OMPOrderedClause(StartLoc, EndLoc);
 }
 
 OMPClause *Sema::ActOnOpenMPNowaitClause(SourceLocation StartLoc,
@@ -6564,4 +6680,3 @@ Sema::ActOnOpenMPDependClause(OpenMPDependClauseKind DepKind,
   return OMPDependClause::Create(Context, StartLoc, LParenLoc, EndLoc, DepKind,
                                  DepLoc, ColonLoc, Vars);
 }
-
