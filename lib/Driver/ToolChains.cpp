@@ -3871,5 +3871,3 @@ void AAP::addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
   CC1Args.push_back("-nostdsysteminc");
   CC1Args.push_back("-dwarf-column-info");
 }
-
-
