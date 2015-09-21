@@ -413,6 +413,7 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
     // clang-cl targets MSVC-style Win32.
     llvm::Triple T(DefaultTargetTriple);
     T.setOS(llvm::Triple::Win32);
+    T.setVendor(llvm::Triple::PC);
     T.setEnvironment(llvm::Triple::MSVC);
     DefaultTargetTriple = T.str();
   }
@@ -950,8 +951,8 @@ static bool ContainsCompileOrAssembleAction(const Action *A) {
       isa<AssembleJobAction>(A))
     return true;
 
-  for (Action::const_iterator it = A->begin(), ie = A->end(); it != ie; ++it)
-    if (ContainsCompileOrAssembleAction(*it))
+  for (const Action *Input : *A)
+    if (ContainsCompileOrAssembleAction(Input))
       return true;
 
   return false;
@@ -992,9 +993,7 @@ void Driver::BuildUniversalActions(const ToolChain &TC, DerivedArgList &Args,
 
   // Add in arch bindings for every top level action, as well as lipo and
   // dsymutil steps if needed.
-  for (unsigned i = 0, e = SingleActions.size(); i != e; ++i) {
-    Action *Act = SingleActions[i];
-
+  for (Action* Act : SingleActions) {
     // Make sure we can lipo this kind of output. If not (and it is an actual
     // output) then we disallow, since we can't create an output file with the
     // right name without overwriting it. We could remove this oddity by just
@@ -1233,11 +1232,13 @@ void Driver::BuildInputs(const ToolChain &TC, DerivedArgList &Args,
   }
 }
 
-// For each unique --cuda-gpu-arch= argument creates a TY_CUDA_DEVICE input
-// action and then wraps each in CudaDeviceAction paired with appropriate GPU
-// arch name. If we're only building device-side code, each action remains
-// independent. Otherwise we pass device-side actions as inputs to a new
-// CudaHostAction which combines both host and device side actions.
+// For each unique --cuda-gpu-arch= argument creates a TY_CUDA_DEVICE
+// input action and then wraps each in CudaDeviceAction paired with
+// appropriate GPU arch name. In case of partial (i.e preprocessing
+// only) or device-only compilation, each device action is added to /p
+// Actions and /p Current is released. Otherwise the function creates
+// and returns a new CudaHostAction which wraps /p Current and device
+// side actions.
 static std::unique_ptr<Action>
 buildCudaActions(const Driver &D, const ToolChain &TC, DerivedArgList &Args,
                  const Arg *InputArg, std::unique_ptr<Action> HostAction,
@@ -1421,22 +1422,14 @@ void Driver::BuildActions(const ToolChain &TC, DerivedArgList &Args,
     }
 
     phases::ID CudaInjectionPhase;
-    if (isSaveTempsEnabled()) {
-      // All phases are done independently, inject GPU blobs during compilation
-      // phase as that's where we generate glue code to init them.
-      CudaInjectionPhase = phases::Compile;
-    } else {
-      // Assumes that clang does everything up until linking phase, so we inject
-      // cuda device actions at the last step before linking. Otherwise CUDA
-      // host action forces preprocessor into a separate invocation.
-      CudaInjectionPhase = FinalPhase;
-      if (FinalPhase == phases::Link)
-        for (auto PI = PL.begin(), PE = PL.end(); PI != PE; ++PI) {
-          auto next = PI + 1;
-          if (next != PE && *next == phases::Link)
-            CudaInjectionPhase = *PI;
-        }
-    }
+    bool InjectCuda = (InputType == types::TY_CUDA &&
+                       !Args.hasArg(options::OPT_cuda_host_only));
+    CudaInjectionPhase = FinalPhase;
+    for (auto &Phase : PL)
+      if (Phase <= FinalPhase && Phase == phases::Compile) {
+        CudaInjectionPhase = Phase;
+        break;
+      }
 
     // Build the pipeline for this file.
     std::unique_ptr<Action> Current(new InputAction(*InputArg, InputType));
@@ -1464,8 +1457,7 @@ void Driver::BuildActions(const ToolChain &TC, DerivedArgList &Args,
       // Otherwise construct the appropriate action.
       Current = ConstructPhaseAction(TC, Args, Phase, std::move(Current));
 
-      if (InputType == types::TY_CUDA && Phase == CudaInjectionPhase &&
-          !Args.hasArg(options::OPT_cuda_host_only)) {
+      if (InjectCuda && Phase == CudaInjectionPhase) {
         Current = buildCudaActions(*this, TC, Args, InputArg,
                                    std::move(Current), Actions);
         if (!Current)
@@ -1679,10 +1671,17 @@ void Driver::BuildJobs(Compilation &C) const {
   }
 }
 
-static const Tool *SelectToolForJob(Compilation &C, bool SaveTemps,
+// Returns a Tool for a given JobAction.  In case the action and its
+// predecessors can be combined, updates Inputs with the inputs of the
+// first combined action. If one of the collapsed actions is a
+// CudaHostAction, updates CollapsedCHA with the pointer to it so the
+// caller can deal with extra handling such action requires.
+static const Tool *selectToolForJob(Compilation &C, bool SaveTemps,
                                     const ToolChain *TC, const JobAction *JA,
-                                    const ActionList *&Inputs) {
+                                    const ActionList *&Inputs,
+                                    const CudaHostAction *&CollapsedCHA) {
   const Tool *ToolForJob = nullptr;
+  CollapsedCHA = nullptr;
 
   // See if we should look for a compiler with an integrated assembler. We match
   // bottom up, so what we are actually looking for is an assembler job with a
@@ -1699,13 +1698,19 @@ static const Tool *SelectToolForJob(Compilation &C, bool SaveTemps,
     // checking the backend tool, check if the tool for the CompileJob
     // has an integrated assembler.
     const ActionList *BackendInputs = &(*Inputs)[0]->getInputs();
-    JobAction *CompileJA = cast<CompileJobAction>(*BackendInputs->begin());
+    // Compile job may be wrapped in CudaHostAction, extract it if
+    // that's the case and update CollapsedCHA if we combine phases.
+    CudaHostAction *CHA = dyn_cast<CudaHostAction>(*BackendInputs->begin());
+    JobAction *CompileJA =
+        cast<CompileJobAction>(CHA ? *CHA->begin() : *BackendInputs->begin());
+    assert(CompileJA && "Backend job is not preceeded by compile job.");
     const Tool *Compiler = TC->SelectTool(*CompileJA);
     if (!Compiler)
       return nullptr;
     if (Compiler->hasIntegratedAssembler()) {
-      Inputs = &(*BackendInputs)[0]->getInputs();
+      Inputs = &CompileJA->getInputs();
       ToolForJob = Compiler;
+      CollapsedCHA = CHA;
     }
   }
 
@@ -1715,19 +1720,19 @@ static const Tool *SelectToolForJob(Compilation &C, bool SaveTemps,
   if (isa<BackendJobAction>(JA)) {
     // Check if the compiler supports emitting LLVM IR.
     assert(Inputs->size() == 1);
-    JobAction *CompileJA;
-    // Extract real host action, if it's a CudaHostAction.
-    if (CudaHostAction *CudaHA = dyn_cast<CudaHostAction>(*Inputs->begin()))
-      CompileJA = cast<CompileJobAction>(*CudaHA->begin());
-    else
-      CompileJA = cast<CompileJobAction>(*Inputs->begin());
-
+    // Compile job may be wrapped in CudaHostAction, extract it if
+    // that's the case and update CollapsedCHA if we combine phases.
+    CudaHostAction *CHA = dyn_cast<CudaHostAction>(*Inputs->begin());
+    JobAction *CompileJA =
+        cast<CompileJobAction>(CHA ? *CHA->begin() : *Inputs->begin());
+    assert(CompileJA && "Backend job is not preceeded by compile job.");
     const Tool *Compiler = TC->SelectTool(*CompileJA);
     if (!Compiler)
       return nullptr;
     if (!Compiler->canEmitIR() || !SaveTemps) {
-      Inputs = &(*Inputs)[0]->getInputs();
+      Inputs = &CompileJA->getInputs();
       ToolForJob = Compiler;
+      CollapsedCHA = CHA;
     }
   }
 
@@ -1811,9 +1816,22 @@ void Driver::BuildJobsForAction(Compilation &C, const Action *A,
   const ActionList *Inputs = &A->getInputs();
 
   const JobAction *JA = cast<JobAction>(A);
-  const Tool *T = SelectToolForJob(C, isSaveTempsEnabled(), TC, JA, Inputs);
+  const CudaHostAction *CollapsedCHA = nullptr;
+  const Tool *T =
+      selectToolForJob(C, isSaveTempsEnabled(), TC, JA, Inputs, CollapsedCHA);
   if (!T)
     return;
+
+  // If we've collapsed action list that contained CudaHostAction we
+  // need to build jobs for device-side inputs it may have held.
+  if (CollapsedCHA) {
+    InputInfo II;
+    for (const Action *DA : CollapsedCHA->getDeviceActions()) {
+      BuildJobsForAction(C, DA, TC, "", AtTopLevel,
+                         /*MultipleArchs*/ false, LinkingOutput, II);
+      CudaDeviceInputInfos.push_back(II);
+    }
+  }
 
   // Only use pipes when there is exactly one input.
   InputInfoList InputInfos;
@@ -2246,11 +2264,14 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
       case llvm::Triple::xcore:
         TC = new toolchains::XCoreToolChain(*this, Target, Args);
         break;
-      case llvm::Triple::shave:
-        TC = new toolchains::SHAVEToolChain(*this, Target, Args);
+      case llvm::Triple::wasm32:
+      case llvm::Triple::wasm64:
+        TC = new toolchains::WebAssembly(*this, Target, Args);
         break;
       default:
-        if (Target.isOSBinFormatELF())
+        if (Target.getVendor() == llvm::Triple::Myriad)
+          TC = new toolchains::MyriadToolChain(*this, Target, Args);
+        else if (Target.isOSBinFormatELF())
           TC = new toolchains::Generic_ELF(*this, Target, Args);
         else if (Target.isOSBinFormatMachO())
           TC = new toolchains::MachO(*this, Target, Args);

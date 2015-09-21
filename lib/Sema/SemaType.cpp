@@ -700,7 +700,7 @@ static void maybeSynthesizeBlockSignature(TypeProcessingState &state,
       /*VolatileQualifierLoc=*/NoLoc,
       /*RestrictQualifierLoc=*/NoLoc,
       /*MutableLoc=*/NoLoc, EST_None,
-      /*ESpecLoc=*/NoLoc,
+      /*ESpecRange=*/SourceRange(),
       /*Exceptions=*/nullptr,
       /*ExceptionRanges=*/nullptr,
       /*NumExceptions=*/0,
@@ -1397,6 +1397,13 @@ static QualType ConvertDeclSpecToType(TypeProcessingState &state) {
               << Result << "cl_khr_fp64";
           declarator.setInvalidType(true);
         }
+      } else if (!S.getOpenCLOptions().cl_khr_gl_msaa_sharing &&
+                 (Result->isImage2dMSAAT() || Result->isImage2dArrayMSAAT() ||
+                  Result->isImage2dArrayMSAATDepth() ||
+                  Result->isImage2dMSAATDepth())) {
+        S.Diag(DS.getTypeSpecTypeLoc(), diag::err_type_requires_extension)
+            << Result << "cl_khr_gl_msaa_sharing";
+        declarator.setInvalidType(true);
       }
     }
 
@@ -2269,8 +2276,11 @@ QualType Sema::BuildMemberPointerType(QualType T, QualType Class,
 
   // Adjust the default free function calling convention to the default method
   // calling convention.
+  bool IsCtorOrDtor =
+      (Entity.getNameKind() == DeclarationName::CXXConstructorName) ||
+      (Entity.getNameKind() == DeclarationName::CXXDestructorName);
   if (T->isFunctionType())
-    adjustMemberFunctionCC(T, /*IsStatic=*/false);
+    adjustMemberFunctionCC(T, /*IsStatic=*/false, IsCtorOrDtor, Loc);
 
   return Context.getMemberPointerType(T, Class.getTypePtr());
 }
@@ -3833,9 +3843,10 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
       // Exception specs are not allowed in typedefs. Complain, but add it
       // anyway.
       if (IsTypedefName && FTI.getExceptionSpecType())
-        S.Diag(FTI.getExceptionSpecLoc(), diag::err_exception_spec_in_typedef)
-          << (D.getContext() == Declarator::AliasDeclContext ||
-              D.getContext() == Declarator::AliasTemplateContext);
+        S.Diag(FTI.getExceptionSpecLocBeg(),
+               diag::err_exception_spec_in_typedef)
+            << (D.getContext() == Declarator::AliasDeclContext ||
+                D.getContext() == Declarator::AliasTemplateContext);
 
       // If we see "T var();" or "T var(T());" at block scope, it is probably
       // an attempt to initialize a variable, not a function declaration.
@@ -5841,24 +5852,40 @@ bool Sema::hasExplicitCallingConv(QualType &T) {
   return false;
 }
 
-void Sema::adjustMemberFunctionCC(QualType &T, bool IsStatic) {
+void Sema::adjustMemberFunctionCC(QualType &T, bool IsStatic, bool IsCtorOrDtor,
+                                  SourceLocation Loc) {
   FunctionTypeUnwrapper Unwrapped(*this, T);
   const FunctionType *FT = Unwrapped.get();
   bool IsVariadic = (isa<FunctionProtoType>(FT) &&
                      cast<FunctionProtoType>(FT)->isVariadic());
-
-  // Only adjust types with the default convention.  For example, on Windows we
-  // should adjust a __cdecl type to __thiscall for instance methods, and a
-  // __thiscall type to __cdecl for static methods.
   CallingConv CurCC = FT->getCallConv();
-  CallingConv FromCC =
-      Context.getDefaultCallingConvention(IsVariadic, IsStatic);
   CallingConv ToCC = Context.getDefaultCallingConvention(IsVariadic, !IsStatic);
-  if (CurCC != FromCC || FromCC == ToCC)
+
+  if (CurCC == ToCC)
     return;
 
-  if (hasExplicitCallingConv(T))
-    return;
+  // MS compiler ignores explicit calling convention attributes on structors. We
+  // should do the same.
+  if (Context.getTargetInfo().getCXXABI().isMicrosoft() && IsCtorOrDtor) {
+    // Issue a warning on ignored calling convention -- except of __stdcall.
+    // Again, this is what MS compiler does.
+    if (CurCC != CC_X86StdCall)
+      Diag(Loc, diag::warn_cconv_structors)
+          << FunctionType::getNameForCallConv(CurCC);
+  // Default adjustment.
+  } else {
+    // Only adjust types with the default convention.  For example, on Windows
+    // we should adjust a __cdecl type to __thiscall for instance methods, and a
+    // __thiscall type to __cdecl for static methods.
+    CallingConv DefaultCC =
+        Context.getDefaultCallingConvention(IsVariadic, IsStatic);
+
+    if (CurCC != DefaultCC || DefaultCC == ToCC)
+      return;
+
+    if (hasExplicitCallingConv(T))
+      return;
+  }
 
   FT = Context.adjustFunctionType(FT, FT->getExtInfo().withCallingConv(ToCC));
   QualType Wrapped = Unwrapped.wrap(*this, FT);
@@ -6464,6 +6491,17 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
   //  assert(!T->isDependentType() &&
   //         "Can't ask whether a dependent type is complete");
 
+  // We lock in the inheritance model once somebody has asked us to ensure
+  // that a pointer-to-member type is complete.
+  if (Context.getTargetInfo().getCXXABI().isMicrosoft()) {
+    if (const MemberPointerType *MPTy = T->getAs<MemberPointerType>()) {
+      if (!MPTy->getClass()->isDependentType()) {
+        RequireCompleteType(Loc, QualType(MPTy->getClass(), 0), 0);
+        assignInheritanceModel(*this, MPTy->getMostRecentCXXRecordDecl());
+      }
+    }
+  }
+
   // If we have a complete type, we're done.
   NamedDecl *Def = nullptr;
   if (!T->isIncompleteType(&Def)) {
@@ -6472,17 +6510,6 @@ bool Sema::RequireCompleteTypeImpl(SourceLocation Loc, QualType T,
     if (!Diagnoser.Suppressed && Def &&
         !hasVisibleDefinition(Def, &SuggestedDef, /*OnlyNeedComplete*/true))
       diagnoseMissingImport(Loc, SuggestedDef, /*NeedDefinition*/true);
-
-    // We lock in the inheritance model once somebody has asked us to ensure
-    // that a pointer-to-member type is complete.
-    if (Context.getTargetInfo().getCXXABI().isMicrosoft()) {
-      if (const MemberPointerType *MPTy = T->getAs<MemberPointerType>()) {
-        if (!MPTy->getClass()->isDependentType()) {
-          RequireCompleteType(Loc, QualType(MPTy->getClass(), 0), 0);
-          assignInheritanceModel(*this, MPTy->getMostRecentCXXRecordDecl());
-        }
-      }
-    }
 
     return false;
   }

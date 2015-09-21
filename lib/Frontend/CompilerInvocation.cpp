@@ -424,6 +424,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
     Opts.DwarfVersion = 3;
   else if (Args.hasArg(OPT_gdwarf_4))
     Opts.DwarfVersion = 4;
+  Opts.DebugTypeExtRefs = Args.hasArg(OPT_dwarf_ext_refs);
 
   if (const Arg *A =
           Args.getLastArg(OPT_emit_llvm_uselists, OPT_no_emit_llvm_uselists))
@@ -493,6 +494,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.NoDwarfDirectoryAsm = Args.hasArg(OPT_fno_dwarf_directory_asm);
   Opts.SoftFloat = Args.hasArg(OPT_msoft_float);
   Opts.StrictEnums = Args.hasArg(OPT_fstrict_enums);
+  Opts.StrictVTablePointers = Args.hasArg(OPT_fstrict_vtable_pointers);
   Opts.UnsafeFPMath = Args.hasArg(OPT_menable_unsafe_fp_math) ||
                       Args.hasArg(OPT_cl_unsafe_math_optimizations) ||
                       Args.hasArg(OPT_cl_fast_relaxed_math);
@@ -708,7 +710,7 @@ static void ParseDependencyOutputArgs(DependencyOutputOptions &Opts,
   // Add sanitizer blacklists as extra dependencies.
   // They won't be discovered by the regular preprocessor, so
   // we let make / ninja to know about this implicit dependency.
-  Opts.ExtraDeps = Args.getAllArgValues(OPT_fsanitize_blacklist);
+  Opts.ExtraDeps = Args.getAllArgValues(OPT_fdepfile_entry);
   auto ModuleFiles = Args.getAllArgValues(OPT_fmodule_file);
   Opts.ExtraDeps.insert(Opts.ExtraDeps.end(), ModuleFiles.begin(),
                         ModuleFiles.end());
@@ -1404,6 +1406,9 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
 
   if (Args.hasArg(OPT_fcuda_is_device))
     Opts.CUDAIsDevice = 1;
+
+  if (Args.hasArg(OPT_fcuda_uses_libdevice))
+    Opts.CUDAUsesLibDevice = 1;
 
   if (Args.hasArg(OPT_fcuda_allow_host_calls_from_host_device))
     Opts.CUDAAllowHostCallsFromHostDevice = 1;

@@ -2469,25 +2469,6 @@ DeclResult Sema::ActOnVarTemplateSpecialization(
                                 false, Converted))
     return true;
 
-  // Check that the type of this variable template specialization
-  // matches the expected type.
-  TypeSourceInfo *ExpectedDI;
-  {
-    // Do substitution on the type of the declaration
-    TemplateArgumentList TemplateArgList(TemplateArgumentList::OnStack,
-                                         Converted.data(), Converted.size());
-    InstantiatingTemplate Inst(*this, TemplateKWLoc, VarTemplate);
-    if (Inst.isInvalid())
-      return true;
-    VarDecl *Templated = VarTemplate->getTemplatedDecl();
-    ExpectedDI =
-        SubstType(Templated->getTypeSourceInfo(),
-                  MultiLevelTemplateArgumentList(TemplateArgList),
-                  Templated->getTypeSpecStartLoc(), Templated->getDeclName());
-  }
-  if (!ExpectedDI)
-    return true;
-
   // Find the variable template (partial) specialization declaration that
   // corresponds to these arguments.
   if (IsPartialSpecialization) {
@@ -4241,7 +4222,11 @@ isNullPointerValueTemplateArgument(Sema &S, NonTypeTemplateParmDecl *Param,
                                    QualType ParamType, Expr *Arg) {
   if (Arg->isValueDependent() || Arg->isTypeDependent())
     return NPV_NotNullPointer;
-  
+
+  if (S.RequireCompleteType(Arg->getExprLoc(), ParamType, 0))
+    llvm_unreachable(
+        "Incomplete parameter type in isNullPointerValueTemplateArgument!");
+
   if (!S.getLangOpts().CPlusPlus11)
     return NPV_NotNullPointer;
   
@@ -4689,8 +4674,6 @@ static bool CheckTemplateArgumentPointerToMember(Sema &S,
     S.Diag(Arg->getExprLoc(), diag::warn_cxx98_compat_template_arg_null);
     Converted = TemplateArgument(S.Context.getCanonicalType(ParamType),
                                  /*isNullPtr*/true);
-    if (S.Context.getTargetInfo().getCXXABI().isMicrosoft())
-      S.RequireCompleteType(Arg->getExprLoc(), ParamType, 0);
     return false;
   case NPV_NotNullPointer:
     break;
@@ -6491,24 +6474,6 @@ Decl *Sema::ActOnTemplateDeclarator(Scope *S,
   return NewDecl;
 }
 
-Decl *Sema::ActOnStartOfFunctionTemplateDef(Scope *FnBodyScope,
-                               MultiTemplateParamsArg TemplateParameterLists,
-                                            Declarator &D) {
-  assert(getCurFunctionDecl() == nullptr && "Function parsing confused");
-  DeclaratorChunk::FunctionTypeInfo &FTI = D.getFunctionTypeInfo();
-
-  if (FTI.hasPrototype) {
-    // FIXME: Diagnose arguments without names in C.
-  }
-
-  Scope *ParentScope = FnBodyScope->getParent();
-
-  D.setFunctionDefinitionKind(FDK_Definition);
-  Decl *DP = HandleDeclarator(ParentScope, D,
-                              TemplateParameterLists);
-  return ActOnStartOfFunctionDef(FnBodyScope, DP);
-}
-
 /// \brief Strips various properties off an implicit instantiation
 /// that has just been explicitly specialized.
 static void StripImplicitInstantiation(NamedDecl *D) {
@@ -7423,11 +7388,16 @@ Sema::ActOnExplicitInstantiation(Scope *S,
       }
     }
 
+    // Set the template specialization kind. Make sure it is set before
+    // instantiating the members which will trigger ASTConsumer callbacks.
+    Specialization->setTemplateSpecializationKind(TSK);
     InstantiateClassTemplateSpecializationMembers(TemplateNameLoc, Def, TSK);
+  } else {
+
+    // Set the template specialization kind.
+    Specialization->setTemplateSpecializationKind(TSK);
   }
 
-  // Set the template specialization kind.
-  Specialization->setTemplateSpecializationKind(TSK);
   return Specialization;
 }
 

@@ -589,6 +589,15 @@ void ASTStmtReader::VisitArraySubscriptExpr(ArraySubscriptExpr *E) {
   E->setRBracketLoc(ReadSourceLocation(Record, Idx));
 }
 
+void ASTStmtReader::VisitOMPArraySectionExpr(OMPArraySectionExpr *E) {
+  VisitExpr(E);
+  E->setBase(Reader.ReadSubExpr());
+  E->setLowerBound(Reader.ReadSubExpr());
+  E->setLength(Reader.ReadSubExpr());
+  E->setColonLoc(ReadSourceLocation(Record, Idx));
+  E->setRBracketLoc(ReadSourceLocation(Record, Idx));
+}
+
 void ASTStmtReader::VisitCallExpr(CallExpr *E) {
   VisitExpr(E);
   E->setNumArgs(Reader.getContext(), Record[Idx++]);
@@ -821,6 +830,7 @@ void ASTStmtReader::VisitVAArgExpr(VAArgExpr *E) {
   E->setWrittenTypeInfo(GetTypeSourceInfo(Record, Idx));
   E->setBuiltinLoc(ReadSourceLocation(Record, Idx));
   E->setRParenLoc(ReadSourceLocation(Record, Idx));
+  E->setIsMicrosoftABI(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitAddrLabelExpr(AddrLabelExpr *E) {
@@ -1716,6 +1726,9 @@ OMPClause *OMPClauseReader::readClause() {
   case OMPC_safelen:
     C = new (Context) OMPSafelenClause();
     break;
+  case OMPC_simdlen:
+    C = new (Context) OMPSimdlenClause();
+    break;
   case OMPC_collapse:
     C = new (Context) OMPCollapseClause();
     break;
@@ -1800,6 +1813,9 @@ OMPClause *OMPClauseReader::readClause() {
 }
 
 void OMPClauseReader::VisitOMPIfClause(OMPIfClause *C) {
+  C->setNameModifier(static_cast<OpenMPDirectiveKind>(Record[Idx++]));
+  C->setNameModifierLoc(Reader->ReadSourceLocation(Record, Idx));
+  C->setColonLoc(Reader->ReadSourceLocation(Record, Idx));
   C->setCondition(Reader->Reader.ReadSubExpr());
   C->setLParenLoc(Reader->ReadSourceLocation(Record, Idx));
 }
@@ -1816,6 +1832,11 @@ void OMPClauseReader::VisitOMPNumThreadsClause(OMPNumThreadsClause *C) {
 
 void OMPClauseReader::VisitOMPSafelenClause(OMPSafelenClause *C) {
   C->setSafelen(Reader->Reader.ReadSubExpr());
+  C->setLParenLoc(Reader->ReadSourceLocation(Record, Idx));
+}
+
+void OMPClauseReader::VisitOMPSimdlenClause(OMPSimdlenClause *C) {
+  C->setSimdlen(Reader->Reader.ReadSubExpr());
   C->setLParenLoc(Reader->ReadSourceLocation(Record, Idx));
 }
 
@@ -2147,6 +2168,7 @@ void ASTStmtReader::VisitOMPParallelDirective(OMPParallelDirective *D) {
   // The NumClauses field was read in ReadStmtFromStream.
   ++Idx;
   VisitOMPExecutableDirective(D);
+  D->setHasCancel(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitOMPSimdDirective(OMPSimdDirective *D) {
@@ -2155,6 +2177,7 @@ void ASTStmtReader::VisitOMPSimdDirective(OMPSimdDirective *D) {
 
 void ASTStmtReader::VisitOMPForDirective(OMPForDirective *D) {
   VisitOMPLoopDirective(D);
+  D->setHasCancel(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitOMPForSimdDirective(OMPForSimdDirective *D) {
@@ -2166,11 +2189,13 @@ void ASTStmtReader::VisitOMPSectionsDirective(OMPSectionsDirective *D) {
   // The NumClauses field was read in ReadStmtFromStream.
   ++Idx;
   VisitOMPExecutableDirective(D);
+  D->setHasCancel(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitOMPSectionDirective(OMPSectionDirective *D) {
   VisitStmt(D);
   VisitOMPExecutableDirective(D);
+  D->setHasCancel(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitOMPSingleDirective(OMPSingleDirective *D) {
@@ -2193,6 +2218,7 @@ void ASTStmtReader::VisitOMPCriticalDirective(OMPCriticalDirective *D) {
 
 void ASTStmtReader::VisitOMPParallelForDirective(OMPParallelForDirective *D) {
   VisitOMPLoopDirective(D);
+  D->setHasCancel(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitOMPParallelForSimdDirective(
@@ -2206,6 +2232,7 @@ void ASTStmtReader::VisitOMPParallelSectionsDirective(
   // The NumClauses field was read in ReadStmtFromStream.
   ++Idx;
   VisitOMPExecutableDirective(D);
+  D->setHasCancel(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitOMPTaskDirective(OMPTaskDirective *D) {
@@ -2213,6 +2240,7 @@ void ASTStmtReader::VisitOMPTaskDirective(OMPTaskDirective *D) {
   // The NumClauses field was read in ReadStmtFromStream.
   ++Idx;
   VisitOMPExecutableDirective(D);
+  D->setHasCancel(Record[Idx++]);
 }
 
 void ASTStmtReader::VisitOMPTaskyieldDirective(OMPTaskyieldDirective *D) {
@@ -2289,6 +2317,8 @@ void ASTStmtReader::VisitOMPCancellationPointDirective(
 
 void ASTStmtReader::VisitOMPCancelDirective(OMPCancelDirective *D) {
   VisitStmt(D);
+  // The NumClauses field was read in ReadStmtFromStream.
+  ++Idx;
   VisitOMPExecutableDirective(D);
   D->setCancelRegion(static_cast<OpenMPDirectiveKind>(Record[Idx++]));
 }
@@ -2522,6 +2552,10 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
 
     case EXPR_ARRAY_SUBSCRIPT:
       S = new (Context) ArraySubscriptExpr(Empty);
+      break;
+
+    case EXPR_OMP_ARRAY_SECTION:
+      S = new (Context) OMPArraySectionExpr(Empty);
       break;
 
     case EXPR_CALL:
@@ -2906,7 +2940,8 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       break;
 
     case STMT_OMP_CANCEL_DIRECTIVE:
-      S = OMPCancelDirective::CreateEmpty(Context, Empty);
+      S = OMPCancelDirective::CreateEmpty(
+          Context, Record[ASTStmtReader::NumStmtFields], Empty);
       break;
 
     case EXPR_CXX_OPERATOR_CALL:

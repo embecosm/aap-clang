@@ -1031,6 +1031,11 @@ Sema::BuildCXXTypeConstructExpr(TypeSourceInfo *TInfo,
     return BuildCXXFunctionalCastExpr(TInfo, LParenLoc, Arg, RParenLoc);
   }
 
+  // C++14 [expr.type.conv]p2: The expression T(), where T is a
+  //   simple-type-specifier or typename-specifier for a non-array complete
+  //   object type or the (possibly cv-qualified) void type, creates a prvalue
+  //   of the specified type, whose value is that produced by value-initializing
+  //   an object of type T.
   QualType ElemTy = Ty;
   if (Ty->isArrayType()) {
     if (!ListInitialization)
@@ -1038,6 +1043,10 @@ Sema::BuildCXXTypeConstructExpr(TypeSourceInfo *TInfo,
                             diag::err_value_init_for_array_type) << FullRange);
     ElemTy = Context.getBaseElementType(Ty);
   }
+
+  if (!ListInitialization && Ty->isFunctionType())
+    return ExprError(Diag(TyBeginLoc, diag::err_value_init_for_function_type)
+                     << FullRange);
 
   if (!Ty->isVoidType() &&
       RequireCompleteType(TyBeginLoc, ElemTy,
@@ -6397,7 +6406,7 @@ static ExprResult attemptRecovery(Sema &SemaRef,
       if (MightBeImplicitMember)
         return SemaRef.BuildPossibleImplicitMemberExpr(
             NewSS, /*TemplateKWLoc*/ SourceLocation(), R,
-            /*TemplateArgs*/ nullptr);
+            /*TemplateArgs*/ nullptr, /*S*/ nullptr);
     } else if (auto *Ivar = dyn_cast<ObjCIvarDecl>(ND)) {
       return SemaRef.LookupInObjCMethod(R, Consumer.getScope(),
                                         Ivar->getIdentifier());

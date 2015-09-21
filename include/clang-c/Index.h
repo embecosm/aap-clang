@@ -32,7 +32,7 @@
  * compatible, thus CINDEX_VERSION_MAJOR is expected to remain stable.
  */
 #define CINDEX_VERSION_MAJOR 0
-#define CINDEX_VERSION_MINOR 30
+#define CINDEX_VERSION_MINOR 31
 
 #define CINDEX_VERSION_ENCODE(major, minor) ( \
       ((major) * 10000)                       \
@@ -1982,7 +1982,11 @@ enum CXCursorKind {
    */
   CXCursor_ObjCSelfExpr                  = 146,
 
-  CXCursor_LastExpr                      = CXCursor_ObjCSelfExpr,
+  /** \brief OpenMP 4.0 [2.4, Array Section].
+   */
+  CXCursor_OMPArraySectionExpr           = 147,
+
+  CXCursor_LastExpr                      = CXCursor_OMPArraySectionExpr,
 
   /* Statements */
   CXCursor_FirstStmt                     = 200,
@@ -2275,7 +2279,8 @@ enum CXCursorKind {
   CXCursor_CUDAGlobalAttr                = 414,
   CXCursor_CUDAHostAttr                  = 415,
   CXCursor_CUDASharedAttr                = 416,
-  CXCursor_LastAttr                      = CXCursor_CUDASharedAttr,
+  CXCursor_VisibilityAttr                = 417,
+  CXCursor_LastAttr                      = CXCursor_VisibilityAttr,
 
   /* Preprocessing */
   CXCursor_PreprocessingDirective        = 500,

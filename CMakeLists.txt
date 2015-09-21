@@ -116,6 +116,19 @@ if( CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR )
   set( CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib${LLVM_LIBDIR_SUFFIX} )
 
   if(LLVM_INCLUDE_TESTS)
+    set(Python_ADDITIONAL_VERSIONS 2.7)
+    include(FindPythonInterp)
+    if(NOT PYTHONINTERP_FOUND)
+      message(FATAL_ERROR
+"Unable to find Python interpreter, required for builds and testing.
+
+Please install Python or specify the PYTHON_EXECUTABLE CMake variable.")
+    endif()
+
+    if( ${PYTHON_VERSION_STRING} VERSION_LESS 2.7 )
+      message(FATAL_ERROR "Python 2.7 or newer is required")
+    endif()
+
     # Check prebuilt llvm/utils.
     if(EXISTS ${LLVM_TOOLS_BINARY_DIR}/FileCheck${CMAKE_EXECUTABLE_SUFFIX}
         AND EXISTS ${LLVM_TOOLS_BINARY_DIR}/count${CMAKE_EXECUTABLE_SUFFIX}
@@ -362,7 +375,7 @@ macro(add_clang_library name)
       set_source_files_properties(${tds}} PROPERTIES HEADER_FILE_ONLY ON)
 
       if(headers OR tds)
-	set(srcs ${headers} ${tds})
+        set(srcs ${headers} ${tds})
       endif()
     endif()
   endif(MSVC_IDE OR XCODE)
@@ -400,6 +413,12 @@ macro(add_clang_executable name)
   set_target_properties(${name} PROPERTIES FOLDER "Clang executables")
   set_clang_windows_version_resource_properties(${name})
 endmacro(add_clang_executable)
+
+macro(add_clang_symlink name dest)
+  add_llvm_tool_symlink(${name} ${dest} ALWAYS_GENERATE)
+  # Always generate install targets
+  llvm_install_symlink(${name} ${dest} ALWAYS_GENERATE)
+endmacro()
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
@@ -559,10 +578,11 @@ endif ()
 if (CLANG_ENABLE_BOOTSTRAP)
   include(ExternalProject)
 
-  if(CMAKE_VERSION VERSION_LESS 3.3.20150708)
-    set(cmake_3_4_USES_TERMINAL_OPTIONS)
-    set(cmake_3_4_USES_TERMINAL)
-  else()
+  if(CMAKE_VERSION VERSION_GREATER 3.1.0)
+    set(cmake_3_1_EXCLUDE_FROM_ALL EXCLUDE_FROM_ALL 1)
+  endif()
+
+  if(CMAKE_VERSION VERSION_GREATER 3.3.20150708)
     set(cmake_3_4_USES_TERMINAL_OPTIONS
       USES_TERMINAL_CONFIGURE 1
       USES_TERMINAL_BUILD 1
@@ -574,26 +594,35 @@ if (CLANG_ENABLE_BOOTSTRAP)
   set(STAMP_DIR ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-stamps/)
   set(BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-bins/)
 
+  # If on Darwin we need to make bootstrap depend on LTO and pass
+  # DARWIN_LTO_LIBRARY so that -flto will work using the just-built compiler
+  if(APPLE)
+    set(LTO_DEP LTO llvm-ar llvm-ranlib)
+    set(LTO_LIBRARY -DDARWIN_LTO_LIBRARY=${CMAKE_BINARY_DIR}/lib/libLTO.dylib)
+    set(LTO_AR -DCMAKE_AR=${CMAKE_BINARY_DIR}/bin/llvm-ar)
+    set(LTO_RANLIB -DCMAKE_RANLIB=${CMAKE_BINARY_DIR}/bin/llvm-ranlib)
+  endif()
+
   add_custom_target(bootstrap-clear
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-cleared
     )
   add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-cleared
-    DEPENDS clang
+    DEPENDS clang ${LTO_DEP}
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${BINARY_DIR}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${BINARY_DIR}
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${STAMP_DIR}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${STAMP_DIR}
-    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-cleared
     COMMENT "Clobberring bootstrap build and stamp directories"
     )
 
   ExternalProject_Add(bootstrap
-    DEPENDS clang
+    DEPENDS clang ${LTO_DEP}
     PREFIX bootstrap
     SOURCE_DIR ${CMAKE_SOURCE_DIR}
     STAMP_DIR ${STAMP_DIR}
     BINARY_DIR ${BINARY_DIR}
+    ${cmake_3_1_EXCLUDE_FROM_ALL}
     CMAKE_ARGS
                 # We shouldn't need to set this here, but INSTALL_DIR doesn't
                 # seem to work, so instead I'm passing this through
@@ -601,6 +630,8 @@ if (CLANG_ENABLE_BOOTSTRAP)
                 ${CLANG_BOOTSTRAP_CMAKE_ARGS}
                 -DCMAKE_CXX_COMPILER=${CMAKE_BINARY_DIR}/bin/clang++
                 -DCMAKE_C_COMPILER=${CMAKE_BINARY_DIR}/bin/clang
+                -DCMAKE_ASM_COMPILER=${CMAKE_BINARY_DIR}/bin/clang
+                ${LTO_LIBRARY} ${LTO_AR} ${LTO_RANLIB}
     INSTALL_COMMAND ""
     STEP_TARGETS configure build
     ${cmake_3_4_USES_TERMINAL_OPTIONS}

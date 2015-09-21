@@ -3589,7 +3589,8 @@ void Parser::ParseStructUnionBody(SourceLocation RecordLoc,
   SmallVector<Decl *, 32> FieldDecls;
 
   // While we still have something to read, read the declarations in the struct.
-  while (Tok.isNot(tok::r_brace) && !isEofOrEom()) {
+  while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof) &&
+         !tryParseMisplacedModuleImport()) {
     // Each iteration of this loop reads one struct-declaration.
 
     // Check for extraneous top-level semicolon.
@@ -5620,7 +5621,7 @@ void Parser::ParseFunctionDeclarator(Declarator &D,
                                              VolatileQualifierLoc,
                                              RestrictQualifierLoc,
                                              /*MutableLoc=*/SourceLocation(),
-                                             ESpecType, ESpecRange.getBegin(),
+                                             ESpecType, ESpecRange,
                                              DynamicExceptions.data(),
                                              DynamicExceptionRanges.data(),
                                              DynamicExceptions.size(),

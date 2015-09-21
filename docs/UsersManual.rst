@@ -1065,6 +1065,16 @@ are listed below.
       order of memory stores the uninitialized value went
       through. This mode may use extra memory in programs that copy
       uninitialized memory a lot.
+   -  ``-fsanitize-memory-use-after-dtor``: Enables use-after-destruction
+      detection in MemorySanitizer. After invocation of the destructor,
+      the object is considered no longer readable. Facilitates the
+      detection of use-after-destroy bugs.
+
+      Setting the MSAN_OPTIONS=poison_in_dtor=1 enables the poisoning of
+      memory at runtime. Any subsequent access to the destroyed object
+      fails at runtime. This feature is still experimental, but this
+      environment variable must be set to 1 in order for the above flag
+      to have any effect.
 
    The ``-fsanitize=`` argument must also be provided when linking, in
    order to link to the appropriate runtime library. When using
@@ -1852,6 +1862,32 @@ Objective-C Language Features
 Objective-C++ Language Features
 ===============================
 
+.. _openmp:
+
+OpenMP Features
+===============
+
+Clang supports all OpenMP 3.1 directives and clauses.  In addition, some
+features of OpenMP 4.0 are supported.  For example, ``#pragma omp simd``,
+``#pragma omp for simd``, ``#pragma omp parallel for simd`` directives, extended
+set of atomic constructs, ``proc_bind`` clause for all parallel-based
+directives, ``depend`` clause for ``#pragma omp task`` directive (except for
+array sections), ``#pragma omp cancel`` and ``#pragma omp cancellation point``
+directives, and ``#pragma omp taskgroup`` directive.
+
+OpenMP support is disabled by default. Use :option:`-fopenmp=libomp` to enable
+it. Support for OpenMP can be disabled with :option:`-fno-openmp`.
+
+Controlling implementation limits
+---------------------------------
+
+.. option:: -fopenmp-use-tls
+
+ Controls code generation for OpenMP threadprivate variables. In presence of
+ this option all threadprivate variables are generated the same way as thread
+ local variables, using TLS support. If :option:`-fno-openmp-use-tls`
+ is provided or target does not support TLS, code generation for threadprivate
+ variables relies on OpenMP runtime library.
 
 .. _target_features:
 

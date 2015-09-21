@@ -1230,9 +1230,9 @@ bool Sema::CheckConstexprFunctionBody(const FunctionDecl *Dcl, Stmt *Body) {
       Diag(Dcl->getLocation(),
            OK ? diag::warn_cxx11_compat_constexpr_body_no_return
               : diag::err_constexpr_body_no_return);
-      return OK;
-    }
-    if (ReturnStmts.size() > 1) {
+      if (!OK)
+        return false;
+    } else if (ReturnStmts.size() > 1) {
       Diag(ReturnStmts.back(),
            getLangOpts().CPlusPlus14
              ? diag::warn_cxx11_compat_constexpr_body_multiple_return
@@ -3481,7 +3481,8 @@ BuildImplicitMemberInitializer(Sema &SemaRef, CXXConstructorDecl *Constructor,
                                          /*TemplateKWLoc=*/SourceLocation(),
                                          /*FirstQualifierInScope=*/nullptr,
                                          MemberLookup,
-                                         /*TemplateArgs=*/nullptr);
+                                         /*TemplateArgs=*/nullptr,
+                                         /*S*/nullptr);
     if (CtorArg.isInvalid())
       return true;
 
@@ -7820,7 +7821,8 @@ bool Sema::CheckUsingShadowDecl(UsingDecl *Using, NamedDecl *Orig,
       FoundEquivalentDecl = true;
     }
 
-    (isa<TagDecl>(D) ? Tag : NonTag) = D;
+    if (isVisible(D))
+      (isa<TagDecl>(D) ? Tag : NonTag) = D;
   }
 
   if (FoundEquivalentDecl)
@@ -9628,7 +9630,7 @@ public:
   Expr *build(Sema &S, SourceLocation Loc) const override {
     return assertNotNull(S.BuildMemberReferenceExpr(
         Builder.build(S, Loc), Type, Loc, IsArrow, SS, SourceLocation(),
-        nullptr, MemberLookup, nullptr).get());
+        nullptr, MemberLookup, nullptr, nullptr).get());
   }
 
   MemberBuilder(const ExprBuilder &Builder, QualType Type, bool IsArrow,
@@ -9838,7 +9840,7 @@ buildSingleCopyAssignRecursively(Sema &S, SourceLocation Loc, QualType T,
                                    SS, /*TemplateKWLoc=*/SourceLocation(),
                                    /*FirstQualifierInScope=*/nullptr,
                                    OpLookup,
-                                   /*TemplateArgs=*/nullptr,
+                                   /*TemplateArgs=*/nullptr, /*S*/nullptr,
                                    /*SuppressQualifierCheck=*/true);
     if (OpEqualRef.isInvalid())
       return StmtError();

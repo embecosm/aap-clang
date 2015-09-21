@@ -107,6 +107,7 @@ unsigned clang::getOpenMPSimpleClauseType(OpenMPClauseKind Kind,
   case OMPC_final:
   case OMPC_num_threads:
   case OMPC_safelen:
+  case OMPC_simdlen:
   case OMPC_collapse:
   case OMPC_private:
   case OMPC_firstprivate:
@@ -190,6 +191,7 @@ const char *clang::getOpenMPSimpleClauseTypeName(OpenMPClauseKind Kind,
   case OMPC_final:
   case OMPC_num_threads:
   case OMPC_safelen:
+  case OMPC_simdlen:
   case OMPC_collapse:
   case OMPC_private:
   case OMPC_firstprivate:
@@ -363,6 +365,16 @@ bool clang::isAllowedClauseForDirective(OpenMPDirectiveKind DKind,
       break;
     }
     break;
+  case OMPD_cancel:
+    switch (CKind) {
+#define OPENMP_CANCEL_CLAUSE(Name)                                             \
+  case OMPC_##Name:                                                            \
+    return true;
+#include "clang/Basic/OpenMPKinds.def"
+    default:
+      break;
+    }
+    break;
   case OMPD_unknown:
   case OMPD_threadprivate:
   case OMPD_section:
@@ -373,7 +385,6 @@ bool clang::isAllowedClauseForDirective(OpenMPDirectiveKind DKind,
   case OMPD_taskwait:
   case OMPD_taskgroup:
   case OMPD_cancellation_point:
-  case OMPD_cancel:
   case OMPD_ordered:
     break;
   }
