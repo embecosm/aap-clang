@@ -6144,21 +6144,29 @@ public:
     Builder.defineMacro("AAP");
     Builder.defineMacro("__AAP__");
   }
-  void getTargetBuiltins(const Builtin::Info *&Records,
-                         unsigned &NumRecords) const override {
-    Records = nullptr;
-    NumRecords = 0;
+
+  ArrayRef<Builtin::Info> getTargetBuiltins() const override {
+    return None;
   }
   bool hasFeature(StringRef Feature) const override {
     return Feature == "AAP";
   }
-  void getGCCRegNames(const char * const *&Names,
-                      unsigned &NumNames) const override;
-  void getGCCRegAliases(const GCCRegAlias *&Aliases,
-                        unsigned &NumAliases) const override {
-    // No aliases.
-    Aliases = nullptr;
-    NumAliases = 0;
+  ArrayRef<const char *> getGCCRegNames() const override {
+    const char * const GCCRegNames[] = {
+       "r0",  "r1",  "r2",  "r3",  "r4",  "r5",  "r6",  "r7",
+       "r8",  "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+      "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
+      "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31",
+      "r32", "r33", "r34", "r35", "r36", "r37", "r38", "r39",
+      "r40", "r41", "r42", "r43", "r44", "r45", "r46", "r47",
+      "r48", "r49", "r50", "r51", "r52", "r53", "r54", "r55",
+      "r56", "r57", "r58", "r59", "r60", "r61", "r62", "r63",
+    };
+    return llvm::makeArrayRef(GCCRegNames);
+  }
+  ArrayRef<TargetInfo::GCCRegAlias> getGCCRegAliases() const override {
+    // No aliases
+    return None;
   }
   bool
   validateAsmConstraint(const char *&Name,
@@ -6180,23 +6188,6 @@ public:
     return TargetInfo::CharPtrBuiltinVaList;
  }
 };
-
-const char * const AAPTargetInfo::GCCRegNames[] = {
-   "r0",  "r1",  "r2",  "r3",  "r4",  "r5",  "r6",  "r7",
-   "r8",  "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-  "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
-  "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31",
-  "r32", "r33", "r34", "r35", "r36", "r37", "r38", "r39",
-  "r40", "r41", "r42", "r43", "r44", "r45", "r46", "r47",
-  "r48", "r49", "r50", "r51", "r52", "r53", "r54", "r55",
-  "r56", "r57", "r58", "r59", "r60", "r61", "r62", "r63",
-};
-
-void AAPTargetInfo::getGCCRegNames(const char * const *&Names,
-                                   unsigned &NumNames) const {
-  Names = AAPTargetInfo::GCCRegNames;
-  NumNames = llvm::array_lengthof(GCCRegNames);
-}
 
 // LLVM and Clang cannot be used directly to output native binaries for
 // target, but is used to compile C code to llvm bitcode with correct
