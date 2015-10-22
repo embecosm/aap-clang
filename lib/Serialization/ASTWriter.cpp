@@ -1166,9 +1166,12 @@ static ASTFileSignature getSignature() {
 }
 
 /// \brief Write the control block.
-void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
-                                  StringRef isysroot,
-                                  const std::string &OutputFile) {
+uint64_t ASTWriter::WriteControlBlock(Preprocessor &PP,
+                                      ASTContext &Context,
+                                      StringRef isysroot,
+                                      const std::string &OutputFile) {
+  ASTFileSignature Signature = 0;
+
   using namespace llvm;
   Stream.EnterSubblock(CONTROL_BLOCK_ID, 5);
   RecordData Record;
@@ -1201,7 +1204,8 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
     // is non-deterministic.
     // FIXME: Remove this when output is deterministic.
     if (Context.getLangOpts().ImplicitModules) {
-      RecordData::value_type Record[] = {getSignature()};
+      Signature = getSignature();
+      RecordData::value_type Record[] = {Signature};
       Stream.EmitRecord(SIGNATURE, Record);
     }
 
@@ -1468,6 +1472,7 @@ void ASTWriter::WriteControlBlock(Preprocessor &PP, ASTContext &Context,
                   PP.getHeaderSearchInfo().getHeaderSearchOpts(),
                   PP.getLangOpts().Modules);
   Stream.ExitBlock();
+  return Signature;
 }
 
 namespace  {
@@ -4012,12 +4017,11 @@ time_t ASTWriter::getTimestampForOutput(const FileEntry *E) const {
   return IncludeTimestamps ? E->getModificationTime() : 0;
 }
 
-void ASTWriter::WriteAST(Sema &SemaRef,
-                         const std::string &OutputFile,
-                         Module *WritingModule, StringRef isysroot,
-                         bool hasErrors) {
+uint64_t ASTWriter::WriteAST(Sema &SemaRef, const std::string &OutputFile,
+                             Module *WritingModule, StringRef isysroot,
+                             bool hasErrors) {
   WritingAST = true;
-  
+
   ASTHasCompilerErrors = hasErrors;
   
   // Emit the file header.
@@ -4031,13 +4035,15 @@ void ASTWriter::WriteAST(Sema &SemaRef,
   Context = &SemaRef.Context;
   PP = &SemaRef.PP;
   this->WritingModule = WritingModule;
-  WriteASTCore(SemaRef, isysroot, OutputFile, WritingModule);
+  ASTFileSignature Signature =
+      WriteASTCore(SemaRef, isysroot, OutputFile, WritingModule);
   Context = nullptr;
   PP = nullptr;
   this->WritingModule = nullptr;
   this->BaseDirectory.clear();
 
   WritingAST = false;
+  return Signature;
 }
 
 template<typename Vector>
@@ -4049,10 +4055,9 @@ static void AddLazyVectorDecls(ASTWriter &Writer, Vector &Vec,
   }
 }
 
-void ASTWriter::WriteASTCore(Sema &SemaRef,
-                             StringRef isysroot,
-                             const std::string &OutputFile, 
-                             Module *WritingModule) {
+uint64_t ASTWriter::WriteASTCore(Sema &SemaRef, StringRef isysroot,
+                                 const std::string &OutputFile,
+                                 Module *WritingModule) {
   using namespace llvm;
 
   bool isModule = WritingModule != nullptr;
@@ -4197,7 +4202,7 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
   }
 
   // Write the control block
-  WriteControlBlock(PP, Context, isysroot, OutputFile);
+  uint64_t Signature = WriteControlBlock(PP, Context, isysroot, OutputFile);
 
   // Write the remaining AST contents.
   Stream.EnterSubblock(AST_BLOCK_ID, 5);
@@ -4527,6 +4532,8 @@ void ASTWriter::WriteASTCore(Sema &SemaRef,
       NumStatements, NumMacros, NumLexicalDeclContexts, NumVisibleDeclContexts};
   Stream.EmitRecord(STATISTICS, Record);
   Stream.ExitBlock();
+
+  return Signature;
 }
 
 void ASTWriter::WriteDeclUpdatesBlocks(RecordDataImpl &OffsetsRecord) {
@@ -5623,27 +5630,52 @@ void ASTWriter::CompletedTagDefinition(const TagDecl *D) {
   }
 }
 
+static bool isImportedDeclContext(ASTReader *Chain, const Decl *D) {
+  if (D->isFromASTFile())
+    return true;
+
+  // If we've not loaded any modules, this can't be imported.
+  if (!Chain || !Chain->getModuleManager().size())
+    return false;
+
+  // The predefined __va_list_tag struct is imported if we imported any decls.
+  // FIXME: This is a gross hack.
+  return D == D->getASTContext().getVaListTagDecl();
+}
+
 void ASTWriter::AddedVisibleDecl(const DeclContext *DC, const Decl *D) {
   // TU and namespaces are handled elsewhere.
   if (isa<TranslationUnitDecl>(DC) || isa<NamespaceDecl>(DC))
     return;
 
-  if (!(!D->isFromASTFile() && cast<Decl>(DC)->isFromASTFile()))
-    return; // Not a source decl added to a DeclContext from PCH.
+  // We're only interested in cases where a local declaration is added to an
+  // imported context.
+  if (D->isFromASTFile() || !isImportedDeclContext(Chain, cast<Decl>(DC)))
+    return;
 
   assert(DC == DC->getPrimaryContext() && "added to non-primary context");
   assert(!getDefinitiveDeclContext(DC) && "DeclContext not definitive!");
   assert(!WritingAST && "Already writing the AST!");
-  UpdatedDeclContexts.insert(DC);
+  if (UpdatedDeclContexts.insert(DC) && !cast<Decl>(DC)->isFromASTFile()) {
+    // We're adding a visible declaration to a predefined decl context. Ensure
+    // that we write out all of its lookup results so we don't get a nasty
+    // surprise when we try to emit its lookup table.
+    for (auto *Child : DC->decls())
+      UpdatingVisibleDecls.push_back(Child);
+  }
   UpdatingVisibleDecls.push_back(D);
 }
 
 void ASTWriter::AddedCXXImplicitMember(const CXXRecordDecl *RD, const Decl *D) {
   assert(D->isImplicit());
-  if (!(!D->isFromASTFile() && RD->isFromASTFile()))
-    return; // Not a source member added to a class from PCH.
+
+  // We're only interested in cases where a local declaration is added to an
+  // imported context.
+  if (D->isFromASTFile() || !isImportedDeclContext(Chain, RD))
+    return;
+
   if (!isa<CXXMethodDecl>(D))
-    return; // We are interested in lazily declared implicit methods.
+    return;
 
   // A decl coming from PCH was modified.
   assert(RD->isCompleteDefinition());

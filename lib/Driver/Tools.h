@@ -14,6 +14,7 @@
 #include "clang/Driver/Tool.h"
 #include "clang/Driver/Types.h"
 #include "clang/Driver/Util.h"
+#include "clang/Frontend/CodeGenOptions.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Option/Option.h"
 #include "llvm/Support/Compiler.h"
@@ -37,8 +38,9 @@ class Compiler;
 
 using llvm::opt::ArgStringList;
 
-SmallString<128> getCompilerRT(const ToolChain &TC, StringRef Component,
-                               bool Shared = false);
+SmallString<128> getCompilerRT(const ToolChain &TC,
+                               const llvm::opt::ArgList &Args,
+                               StringRef Component, bool Shared = false);
 
 /// \brief Clang compiler tool.
 class LLVM_LIBRARY_VISIBILITY Clang : public Tool {
@@ -89,7 +91,9 @@ private:
                                  RewriteKind rewrite) const;
 
   void AddClangCLArgs(const llvm::opt::ArgList &Args,
-                      llvm::opt::ArgStringList &CmdArgs) const;
+                      llvm::opt::ArgStringList &CmdArgs,
+                      enum CodeGenOptions::DebugInfoKind *DebugInfoKind,
+                      bool *EmitCodeView) const;
 
   visualstudio::Compiler *getCLFallback() const;
 
@@ -248,7 +252,8 @@ std::string getARMTargetCPU(StringRef CPU, StringRef Arch,
 const std::string getARMArch(StringRef Arch,
                              const llvm::Triple &Triple);
 StringRef getARMCPUForMArch(StringRef Arch, const llvm::Triple &Triple);
-StringRef getLLVMArchSuffixForARM(StringRef CPU, StringRef Arch);
+StringRef getLLVMArchSuffixForARM(StringRef CPU, StringRef Arch,
+                                  const llvm::Triple &Triple);
 
 void appendEBLinkFlags(const llvm::opt::ArgList &Args, ArgStringList &CmdArgs,
                        const llvm::Triple &Triple);
@@ -827,6 +832,36 @@ public:
                     const char *LinkingOutput) const override;
 };
 } // end namespace Myriad
+
+namespace PS4cpu {
+class LLVM_LIBRARY_VISIBILITY Assemble : public Tool {
+public:
+  Assemble(const ToolChain &TC)
+      : Tool("PS4cpu::Assemble", "assembler", TC, RF_Full) {}
+
+  virtual bool hasIntegratedCPP() const { return false; }
+
+  virtual void ConstructJob(Compilation &C, const JobAction &JA,
+                            const InputInfo &Output,
+                            const InputInfoList &Inputs,
+                            const llvm::opt::ArgList &TCArgs,
+                            const char *LinkingOutput) const;
+};
+
+class LLVM_LIBRARY_VISIBILITY Link : public Tool {
+public:
+  Link(const ToolChain &TC) : Tool("PS4cpu::Link", "linker", TC, RF_Full) {}
+
+  virtual bool hasIntegratedCPP() const { return false; }
+  virtual bool isLinkJob() const { return true; }
+
+  virtual void ConstructJob(Compilation &C, const JobAction &JA,
+                            const InputInfo &Output,
+                            const InputInfoList &Inputs,
+                            const llvm::opt::ArgList &TCArgs,
+                            const char *LinkingOutput) const;
+};
+} // end namespace PS4cpu
 
 namespace AAP {
   class LLVM_LIBRARY_VISIBILITY Assemble : public Tool {

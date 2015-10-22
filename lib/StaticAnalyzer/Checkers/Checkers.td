@@ -493,6 +493,10 @@ def EmptyLocalizationContextChecker : Checker<"EmptyLocalizationContextChecker">
   HelpText<"Check that NSLocalizedString macros include a comment for context">,
   DescFile<"LocalizationChecker.cpp">;
 
+def PluralMisuseChecker : Checker<"PluralMisuseChecker">,
+  HelpText<"Warns against using one vs. many plural pattern in code when generating localized strings.">,
+  DescFile<"LocalizationChecker.cpp">;
+
 } // end "alpha.osx.cocoa"
 
 let ParentPackage = CoreFoundation in {
@@ -585,6 +589,10 @@ def ExprInspectionChecker : Checker<"ExprInspection">,
 
 def ExplodedGraphViewer : Checker<"ViewExplodedGraph">,
   HelpText<"View Exploded Graphs using GraphViz">,
+  DescFile<"DebugCheckers.cpp">;
+
+def BugHashDumper : Checker<"DumpBugHash">,
+  HelpText<"Dump the bug hash for all statements.">,
   DescFile<"DebugCheckers.cpp">;
 
 } // end "debug"

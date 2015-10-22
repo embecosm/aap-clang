@@ -780,6 +780,16 @@ EmitComplexPrePostIncDec(const UnaryOperator *E, LValue LV,
   return isPre ? IncVal : InVal;
 }
 
+void CodeGenModule::EmitExplicitCastExprType(const ExplicitCastExpr *E,
+                                             CodeGenFunction *CGF) {
+  // Bind VLAs in the cast type.
+  if (CGF && E->getType()->isVariablyModifiedType())
+    CGF->EmitVariablyModifiedType(E->getType());
+
+  if (CGDebugInfo *DI = getModuleDebugInfo())
+    DI->EmitExplicitCastType(E->getType());
+}
+
 //===----------------------------------------------------------------------===//
 //                         LValue Expression Emission
 //===----------------------------------------------------------------------===//
@@ -795,9 +805,8 @@ Address CodeGenFunction::EmitPointerWithAlignment(const Expr *E,
 
   // Casts:
   if (const CastExpr *CE = dyn_cast<CastExpr>(E)) {
-    // Bind VLAs in the cast type.
-    if (E->getType()->isVariablyModifiedType())
-      EmitVariablyModifiedType(E->getType());
+    if (const auto *ECE = dyn_cast<ExplicitCastExpr>(CE))
+      CGM.EmitExplicitCastExprType(ECE, this);
 
     switch (CE->getCastKind()) {
     // Non-converting casts (but not C's implicit conversion from void*).
@@ -814,7 +823,6 @@ Address CodeGenFunction::EmitPointerWithAlignment(const Expr *E,
         // If this is an explicit bitcast, and the source l-value is
         // opaque, honor the alignment of the casted-to type.
         if (isa<ExplicitCastExpr>(CE) &&
-            CE->getCastKind() == CK_BitCast &&
             InnerSource != AlignmentSource::Decl) {
           Addr = Address(Addr.getPointer(),
                          getNaturalPointeeTypeAlignment(E->getType(), Source));
@@ -3428,6 +3436,7 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
     // This must be a reinterpret_cast (or c-style equivalent).
     const auto *CE = cast<ExplicitCastExpr>(E);
 
+    CGM.EmitExplicitCastExprType(CE, this);
     LValue LV = EmitLValue(E->getSubExpr());
     Address V = Builder.CreateBitCast(LV.getAddress(),
                                       ConvertType(CE->getTypeAsWritten()));
