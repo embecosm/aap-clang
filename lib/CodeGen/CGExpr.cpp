@@ -824,7 +824,8 @@ Address CodeGenFunction::EmitPointerWithAlignment(const Expr *E,
                          getNaturalPointeeTypeAlignment(E->getType(), Source));
         }
 
-        if (SanOpts.has(SanitizerKind::CFIUnrelatedCast)) {
+        if (SanOpts.has(SanitizerKind::CFIUnrelatedCast) &&
+            CE->getCastKind() == CK_BitCast) {
           if (auto PT = E->getType()->getAs<PointerType>())
             EmitVTablePtrCheckForCast(PT->getPointeeType(), Addr.getPointer(),
                                       /*MayBeNull=*/true,
@@ -3365,6 +3366,7 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   case CK_PointerToBoolean:
   case CK_VectorSplat:
   case CK_IntegralCast:
+  case CK_BooleanToSignedIntegral:
   case CK_IntegralToBoolean:
   case CK_IntegralToFloating:
   case CK_FloatingToIntegral:

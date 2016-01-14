@@ -2585,6 +2585,7 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
   // When using an integrated assembler, translate -Wa, and -Xassembler
   // options.
   bool CompressDebugSections = false;
+  const char *MipsTargetFeature = nullptr;
   for (const Arg *A :
        Args.filtered(options::OPT_Wa_COMMA, options::OPT_Xassembler)) {
     A->claim();
@@ -2623,7 +2624,26 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
           CmdArgs.push_back("-soft-float");
           continue;
         }
-        break;
+
+        MipsTargetFeature = llvm::StringSwitch<const char *>(Value)
+                                .Case("-mips1", "+mips1")
+                                .Case("-mips2", "+mips2")
+                                .Case("-mips3", "+mips3")
+                                .Case("-mips4", "+mips4")
+                                .Case("-mips5", "+mips5")
+                                .Case("-mips32", "+mips32")
+                                .Case("-mips32r2", "+mips32r2")
+                                .Case("-mips32r3", "+mips32r3")
+                                .Case("-mips32r5", "+mips32r5")
+                                .Case("-mips32r6", "+mips32r6")
+                                .Case("-mips64", "+mips64")
+                                .Case("-mips64r2", "+mips64r2")
+                                .Case("-mips64r3", "+mips64r3")
+                                .Case("-mips64r5", "+mips64r5")
+                                .Case("-mips64r6", "+mips64r6")
+                                .Default(nullptr);
+        if (MipsTargetFeature)
+          continue;
       }
 
       if (Value == "-force_cpusubtype_ALL") {
@@ -2670,6 +2690,10 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
       CmdArgs.push_back("-compress-debug-sections");
     else
       D.Diag(diag::warn_debug_compression_unavailable);
+  }
+  if (MipsTargetFeature != nullptr) {
+    CmdArgs.push_back("-target-feature");
+    CmdArgs.push_back(MipsTargetFeature);
   }
 }
 
@@ -2987,7 +3011,7 @@ static void SplitDebugInfo(const ToolChain &TC, Compilation &C, const Tool &T,
   ExtractArgs.push_back(OutFile);
 
   const char *Exec = Args.MakeArgString(TC.GetProgramPath("objcopy"));
-  InputInfo II(Output.getFilename(), types::TY_Object, Output.getFilename());
+  InputInfo II(types::TY_Object, Output.getFilename(), Output.getFilename());
 
   // First extract the dwo sections.
   C.addCommand(llvm::make_unique<Command>(JA, T, Exec, ExtractArgs, II));
@@ -3270,8 +3294,9 @@ ParsePICArgs(const ToolChain &ToolChain, const llvm::Triple &Triple,
   // ToolChain.getTriple() and Triple?
   bool PIE = ToolChain.isPIEDefault();
   bool PIC = PIE || ToolChain.isPICDefault();
-  // The Darwin default to use PIC does not apply when using -static.
-  if (ToolChain.getTriple().isOSDarwin() && Args.hasArg(options::OPT_static))
+  // The Darwin/MachO default to use PIC does not apply when using -static.
+  if (ToolChain.getTriple().isOSBinFormatMachO() &&
+      Args.hasArg(options::OPT_static))
     PIE = PIC = false;
   bool IsPICLevelTwo = PIC;
 
@@ -8998,7 +9023,7 @@ void nacltools::AssemblerARM::ConstructJob(Compilation &C, const JobAction &JA,
                                            const char *LinkingOutput) const {
   const toolchains::NaClToolChain &ToolChain =
       static_cast<const toolchains::NaClToolChain &>(getToolChain());
-  InputInfo NaClMacros(ToolChain.GetNaClArmMacrosPath(), types::TY_PP_Asm,
+  InputInfo NaClMacros(types::TY_PP_Asm, ToolChain.GetNaClArmMacrosPath(),
                        "nacl-arm-macros.s");
   InputInfoList NewInputs;
   NewInputs.push_back(NaClMacros);
