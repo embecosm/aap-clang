@@ -6497,7 +6497,6 @@ ArrayRef<const char *> MSP430TargetInfo::getGCCRegNames() const {
 }
 
 class AAPTargetInfo : public TargetInfo {
-  static const char * const GCCRegNames[];
 public:
   AAPTargetInfo(const llvm::Triple &Triple) : TargetInfo(Triple) {
     BigEndian = false;
