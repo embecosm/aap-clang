@@ -19,6 +19,7 @@
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/Config/llvm-config.h"
 #include <atomic>
@@ -111,6 +112,20 @@ bool FileSystem::exists(const Twine &Path) {
   return Status && Status->exists();
 }
 
+#ifndef NDEBUG
+static bool isTraversalComponent(StringRef Component) {
+  return Component.equals("..") || Component.equals(".");
+}
+
+static bool pathHasTraversal(StringRef Path) {
+  using namespace llvm::sys;
+  for (StringRef Comp : llvm::make_range(path::begin(Path), path::end(Path)))
+    if (isTraversalComponent(Comp))
+      return true;
+  return false;
+}
+#endif
+
 //===-----------------------------------------------------------------------===/
 // RealFileSystem implementation
 //===-----------------------------------------------------------------------===/
@@ -158,21 +173,10 @@ RealFile::getBuffer(const Twine &Name, int64_t FileSize,
                                    IsVolatile);
 }
 
-// FIXME: This is terrible, we need this for ::close.
-#if !defined(_MSC_VER) && !defined(__MINGW32__)
-#include <unistd.h>
-#include <sys/uio.h>
-#else
-#include <io.h>
-#ifndef S_ISFIFO
-#define S_ISFIFO(x) (0)
-#endif
-#endif
 std::error_code RealFile::close() {
-  if (::close(FD))
-    return std::error_code(errno, std::generic_category());
+  std::error_code EC = sys::Process::SafelyCloseFileDescriptor(FD);
   FD = -1;
-  return std::error_code();
+  return EC;
 }
 
 namespace {
@@ -829,6 +833,16 @@ class RedirectingFileSystem : public vfs::FileSystem {
   bool UseExternalNames;
   /// @}
 
+  /// Virtual file paths and external files could be canonicalized without "..",
+  /// "." and "./" in their paths. FIXME: some unittests currently fail on
+  /// win32 when using remove_dots and remove_leading_dotslash on paths.
+  bool UseCanonicalizedPaths =
+#ifdef LLVM_ON_WIN32
+      false;
+#else
+      true;
+#endif
+
   friend class RedirectingFileSystemParser;
 
 private:
@@ -964,7 +978,7 @@ class RedirectingFileSystemParser {
     return true;
   }
 
-  std::unique_ptr<Entry> parseEntry(yaml::Node *N) {
+  std::unique_ptr<Entry> parseEntry(yaml::Node *N, RedirectingFileSystem *FS) {
     yaml::MappingNode *M = dyn_cast<yaml::MappingNode>(N);
     if (!M) {
       error(N, "expected mapping node for file or directory entry");
@@ -1004,7 +1018,17 @@ class RedirectingFileSystemParser {
       if (Key == "name") {
         if (!parseScalarString(I->getValue(), Value, Buffer))
           return nullptr;
-        Name = Value;
+
+        if (FS->UseCanonicalizedPaths) {
+          SmallString<256> Path(Value);
+          // Guarantee that old YAML files containing paths with ".." and "."
+          // are properly canonicalized before read into the VFS.
+          Path = sys::path::remove_leading_dotslash(Path);
+          sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+          Name = Path.str();
+        } else {
+          Name = Value;
+        }
       } else if (Key == "type") {
         if (!parseScalarString(I->getValue(), Value, Buffer))
           return nullptr;
@@ -1034,7 +1058,7 @@ class RedirectingFileSystemParser {
         for (yaml::SequenceNode::iterator I = Contents->begin(),
                                           E = Contents->end();
              I != E; ++I) {
-          if (std::unique_ptr<Entry> E = parseEntry(&*I))
+          if (std::unique_ptr<Entry> E = parseEntry(&*I, FS))
             EntryArrayContents.push_back(std::move(E));
           else
             return nullptr;
@@ -1048,7 +1072,16 @@ class RedirectingFileSystemParser {
         HasContents = true;
         if (!parseScalarString(I->getValue(), Value, Buffer))
           return nullptr;
-        ExternalContentsPath = Value;
+        if (FS->UseCanonicalizedPaths) {
+          SmallString<256> Path(Value);
+          // Guarantee that old YAML files containing paths with ".." and "."
+          // are properly canonicalized before read into the VFS.
+          Path = sys::path::remove_leading_dotslash(Path);
+          sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+          ExternalContentsPath = Path.str();
+        } else {
+          ExternalContentsPath = Value;
+        }
       } else if (Key == "use-external-name") {
         bool Val;
         if (!parseScalarBool(I->getValue(), Val))
@@ -1159,7 +1192,7 @@ public:
 
         for (yaml::SequenceNode::iterator I = Roots->begin(), E = Roots->end();
              I != E; ++I) {
-          if (std::unique_ptr<Entry> E = parseEntry(&*I))
+          if (std::unique_ptr<Entry> E = parseEntry(&*I, FS))
             FS->Roots.push_back(std::move(E));
           else
             return false;
@@ -1238,6 +1271,14 @@ ErrorOr<Entry *> RedirectingFileSystem::lookupPath(const Twine &Path_) {
   if (std::error_code EC = makeAbsolute(Path))
     return EC;
 
+  // Canonicalize path by removing ".", "..", "./", etc components. This is
+  // a VFS request, do bot bother about symlinks in the path components
+  // but canonicalize in order to perform the correct entry search.
+  if (UseCanonicalizedPaths) {
+    Path = sys::path::remove_leading_dotslash(Path);
+    sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+  }
+
   if (Path.empty())
     return make_error_code(llvm::errc::invalid_argument);
 
@@ -1254,10 +1295,17 @@ ErrorOr<Entry *> RedirectingFileSystem::lookupPath(const Twine &Path_) {
 ErrorOr<Entry *>
 RedirectingFileSystem::lookupPath(sys::path::const_iterator Start,
                                   sys::path::const_iterator End, Entry *From) {
+#ifndef LLVM_ON_WIN32
+  assert(!isTraversalComponent(*Start) &&
+         !isTraversalComponent(From->getName()) &&
+         "Paths should not contain traversal components");
+#else
+  // FIXME: this is here to support windows, remove it once canonicalized
+  // paths become globally default.
   if (Start->equals("."))
     ++Start;
+#endif
 
-  // FIXME: handle ..
   if (CaseSensitive ? !Start->equals(From->getName())
                     : !Start->equals_lower(From->getName()))
     // failure to match
@@ -1375,16 +1423,6 @@ UniqueID vfs::getNextVirtualUniqueID() {
   // dev_t value from the OS.
   return UniqueID(std::numeric_limits<uint64_t>::max(), ID);
 }
-
-#ifndef NDEBUG
-static bool pathHasTraversal(StringRef Path) {
-  using namespace llvm::sys;
-  for (StringRef Comp : llvm::make_range(path::begin(Path), path::end(Path)))
-    if (Comp == "." || Comp == "..")
-      return true;
-  return false;
-}
-#endif
 
 void YAMLVFSWriter::addFileMapping(StringRef VirtualPath, StringRef RealPath) {
   assert(sys::path::is_absolute(VirtualPath) && "virtual path not absolute");

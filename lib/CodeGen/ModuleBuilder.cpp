@@ -64,8 +64,9 @@ namespace {
                       CoverageSourceInfo *CoverageInfo = nullptr)
         : Diags(diags), Ctx(nullptr), HeaderSearchOpts(HSO),
           PreprocessorOpts(PPO), CodeGenOpts(CGO), HandlingTopLevelDecls(0),
-          CoverageInfo(CoverageInfo),
-          M(new llvm::Module(ModuleName, C)) {}
+          CoverageInfo(CoverageInfo), M(new llvm::Module(ModuleName, C)) {
+      C.setDiscardValueNames(CGO.DiscardValueNames);
+    }
 
     ~CodeGeneratorImpl() override {
       // There should normally not be any leftover inline method definitions.
@@ -98,15 +99,15 @@ namespace {
       Ctx = &Context;
 
       M->setTargetTriple(Ctx->getTargetInfo().getTriple().getTriple());
-      M->setDataLayout(Ctx->getTargetInfo().getDataLayoutString());
+      M->setDataLayout(Ctx->getTargetInfo().getDataLayout());
       Builder.reset(new CodeGen::CodeGenModule(Context, HeaderSearchOpts,
                                                PreprocessorOpts, CodeGenOpts,
                                                *M, Diags, CoverageInfo));
 
       for (auto &&Lib : CodeGenOpts.DependentLibraries)
-        HandleDependentLibrary(Lib);
+        Builder->AddDependentLib(Lib);
       for (auto &&Opt : CodeGenOpts.LinkerOptions)
-        HandleLinkerOption(Opt);
+        Builder->AppendLinkerOptions(Opt);
     }
 
     void HandleCXXStaticMemberVarInstantiation(VarDecl *VD) override {
@@ -187,6 +188,15 @@ namespace {
           }
         }
       }
+      // For OpenMP emit declare reduction functions, if required.
+      if (Ctx->getLangOpts().OpenMP) {
+        for (Decl *Member : D->decls()) {
+          if (auto *DRD = dyn_cast<OMPDeclareReductionDecl>(Member)) {
+            if (Ctx->DeclMustBeEmitted(DRD))
+              Builder->EmitGlobal(DRD);
+          }
+        }
+      }
     }
 
     void HandleTagDeclRequiredDefinition(const TagDecl *D) override {
@@ -199,15 +209,25 @@ namespace {
     }
 
     void HandleTranslationUnit(ASTContext &Ctx) override {
+      // Release the Builder when there is no error.
+      if (!Diags.hasErrorOccurred() && Builder)
+        Builder->Release();
+
+      // If there are errors before or when releasing the Builder, reset
+      // the module to stop here before invoking the backend.
       if (Diags.hasErrorOccurred()) {
         if (Builder)
           Builder->clear();
         M.reset();
         return;
       }
+    }
 
-      if (Builder)
-        Builder->Release();
+    void AssignInheritanceModel(CXXRecordDecl *RD) override {
+      if (Diags.hasErrorOccurred())
+        return;
+
+      Builder->RefreshTypeCacheForClass(RD);
     }
 
     void CompleteTentativeDefinition(VarDecl *D) override {
@@ -222,19 +242,6 @@ namespace {
         return;
 
       Builder->EmitVTable(RD);
-    }
-
-    void HandleLinkerOption(llvm::StringRef Opts) override {
-      Builder->AppendLinkerOptions(Opts);
-    }
-
-    void HandleDetectMismatch(llvm::StringRef Name,
-                              llvm::StringRef Value) override {
-      Builder->AddDetectMismatch(Name, Value);
-    }
-
-    void HandleDependentLibrary(llvm::StringRef Lib) override {
-      Builder->AddDependentLib(Lib);
     }
   };
 }

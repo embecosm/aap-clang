@@ -561,15 +561,14 @@ static void GenOpenCLArgMetadata(const FunctionDecl *FD, llvm::Function *Fn,
     argTypeQuals.push_back(llvm::MDString::get(Context, typeQuals));
 
     // Get image and pipe access qualifier:
-    // FIXME: now image and pipe share the same access qualifier maybe we can
-    // refine it to OpenCL access qualifier and also handle write_read
     if (ty->isImageType()|| ty->isPipeType()) {
-      const OpenCLImageAccessAttr *A = parm->getAttr<OpenCLImageAccessAttr>();
+      const OpenCLAccessAttr *A = parm->getAttr<OpenCLAccessAttr>();
       if (A && A->isWriteOnly())
         accessQuals.push_back(llvm::MDString::get(Context, "write_only"));
+      else if (A && A->isReadWrite())
+        accessQuals.push_back(llvm::MDString::get(Context, "read_write"));
       else
         accessQuals.push_back(llvm::MDString::get(Context, "read_only"));
-      // FIXME: what about read_write?
     } else
       accessQuals.push_back(llvm::MDString::get(Context, "none"));
 
@@ -670,6 +669,9 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
 
   DidCallStackSave = false;
   CurCodeDecl = D;
+  if (const auto *FD = dyn_cast_or_null<FunctionDecl>(D))
+    if (FD->usesSEHTry())
+      CurSEHParent = FD;
   CurFuncDecl = (D ? D->getNonClosureContext() : nullptr);
   FnRetTy = RetTy;
   CurFn = Fn;
@@ -745,9 +747,7 @@ void CodeGenFunction::StartFunction(GlobalDecl GD,
   // later.  Don't create this with the builder, because we don't want it
   // folded.
   llvm::Value *Undef = llvm::UndefValue::get(Int32Ty);
-  AllocaInsertPt = new llvm::BitCastInst(Undef, Int32Ty, "", EntryBB);
-  if (Builder.isNamePreserving())
-    AllocaInsertPt->setName("allocapt");
+  AllocaInsertPt = new llvm::BitCastInst(Undef, Int32Ty, "allocapt", EntryBB);
 
   ReturnBlock = getJumpDestInCurrentScope("return");
 
@@ -883,7 +883,7 @@ void CodeGenFunction::EmitFunctionBody(FunctionArgList &Args,
 void CodeGenFunction::EmitBlockWithFallThrough(llvm::BasicBlock *BB,
                                                const Stmt *S) {
   llvm::BasicBlock *SkipCountBB = nullptr;
-  if (HaveInsertPoint() && CGM.getCodeGenOpts().ProfileInstrGenerate) {
+  if (HaveInsertPoint() && CGM.getCodeGenOpts().hasProfileClangInstr()) {
     // When instrumenting for profiling, the fallthrough to certain
     // statements needs to skip over the instrumentation code so that we
     // get an accurate count.
@@ -1764,7 +1764,7 @@ void CodeGenFunction::EmitDeclRefExprDbgValue(const DeclRefExpr *E,
                                               llvm::Constant *Init) {
   assert (Init && "Invalid DeclRefExpr initializer!");
   if (CGDebugInfo *Dbg = getDebugInfo())
-    if (CGM.getCodeGenOpts().getDebugInfo() >= CodeGenOptions::LimitedDebugInfo)
+    if (CGM.getCodeGenOpts().getDebugInfo() >= codegenoptions::LimitedDebugInfo)
       Dbg->EmitGlobalVariable(E->getDecl(), Init);
 }
 
@@ -1860,25 +1860,13 @@ void CodeGenFunction::InsertHelper(llvm::Instruction *I,
     CGM.getSanitizerMetadata()->disableSanitizerForInstruction(I);
 }
 
-template <bool PreserveNames>
-void CGBuilderInserter<PreserveNames>::InsertHelper(
+void CGBuilderInserter::InsertHelper(
     llvm::Instruction *I, const llvm::Twine &Name, llvm::BasicBlock *BB,
     llvm::BasicBlock::iterator InsertPt) const {
-  llvm::IRBuilderDefaultInserter<PreserveNames>::InsertHelper(I, Name, BB,
-                                                              InsertPt);
+  llvm::IRBuilderDefaultInserter::InsertHelper(I, Name, BB, InsertPt);
   if (CGF)
     CGF->InsertHelper(I, Name, BB, InsertPt);
 }
-
-#ifdef NDEBUG
-#define PreserveNames false
-#else
-#define PreserveNames true
-#endif
-template void CGBuilderInserter<PreserveNames>::InsertHelper(
-    llvm::Instruction *I, const llvm::Twine &Name, llvm::BasicBlock *BB,
-    llvm::BasicBlock::iterator InsertPt) const;
-#undef PreserveNames
 
 static bool hasRequiredFeatures(const SmallVectorImpl<StringRef> &ReqFeatures,
                                 CodeGenModule &CGM, const FunctionDecl *FD,

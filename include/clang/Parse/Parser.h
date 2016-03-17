@@ -134,6 +134,12 @@ class Parser : public CodeCompletionHandler {
   /// \brief Identifier for "message".
   IdentifierInfo *Ident_message;
 
+  /// \brief Identifier for "strict".
+  IdentifierInfo *Ident_strict;
+
+  /// \brief Identifier for "replacement".
+  IdentifierInfo *Ident_replacement;
+
   /// C++0x contextual keywords.
   mutable IdentifierInfo *Ident_final;
   mutable IdentifierInfo *Ident_override;
@@ -2195,8 +2201,19 @@ private:
   SourceLocation SkipExtendedMicrosoftTypeAttributes();
   void ParseMicrosoftInheritanceClassAttributes(ParsedAttributes &attrs);
   void ParseBorlandTypeAttributes(ParsedAttributes &attrs);
-  void ParseOpenCLAttributes(ParsedAttributes &attrs);
+  void ParseOpenCLKernelAttributes(ParsedAttributes &attrs);
   void ParseOpenCLQualifiers(ParsedAttributes &Attrs);
+  /// \brief Parses opencl_unroll_hint attribute if language is OpenCL v2.0
+  /// or higher.
+  /// \return false if error happens.
+  bool MaybeParseOpenCLUnrollHintAttribute(ParsedAttributes &Attrs) {
+    if (getLangOpts().OpenCL)
+      return ParseOpenCLUnrollHintAttribute(Attrs);
+    return true;
+  }
+  /// \brief Parses opencl_unroll_hint attribute.
+  /// \return false if error happens.
+  bool ParseOpenCLUnrollHintAttribute(ParsedAttributes &Attrs);
   void ParseNullabilityTypeSpecifiers(ParsedAttributes &attrs);
 
   VersionTuple ParseVersionTuple(SourceRange &Range);
@@ -2440,7 +2457,9 @@ private:
   //===--------------------------------------------------------------------===//
   // OpenMP: Directives and clauses.
   /// \brief Parses declarative OpenMP directives.
-  DeclGroupPtrTy ParseOpenMPDeclarativeDirective();
+  DeclGroupPtrTy ParseOpenMPDeclarativeDirective(AccessSpecifier AS);
+  /// \brief Parse 'omp declare reduction' construct.
+  DeclGroupPtrTy ParseOpenMPDeclareReductionDirective(AccessSpecifier AS);
   /// \brief Parses simple list of variables.
   ///
   /// \param Kind Kind of the directive.

@@ -1551,7 +1551,8 @@ Sema::BuildCXXNew(SourceRange Range, bool UseGlobal,
   // new.
   if (PlacementArgs.empty() && OperatorNew &&
       (OperatorNew->isImplicit() ||
-       getSourceManager().isInSystemHeader(OperatorNew->getLocStart()))) {
+       (OperatorNew->getLocStart().isValid() &&
+        getSourceManager().isInSystemHeader(OperatorNew->getLocStart())))) {
     if (unsigned Align = Context.getPreferredTypeAlign(AllocType.getTypePtr())){
       unsigned SuitableAlign = Context.getTargetInfo().getSuitableAlign();
       if (Align > SuitableAlign)
@@ -6585,6 +6586,14 @@ public:
   ExprResult TransformLambdaExpr(LambdaExpr *E) { return Owned(E); }
 
   ExprResult TransformBlockExpr(BlockExpr *E) { return Owned(E); }
+
+  ExprResult TransformObjCPropertyRefExpr(ObjCPropertyRefExpr *E) {
+    return Owned(E);
+  }
+
+  ExprResult TransformObjCIvarRefExpr(ObjCIvarRefExpr *E) {
+    return Owned(E);
+  }
 
   ExprResult Transform(Expr *E) {
     ExprResult Res;
