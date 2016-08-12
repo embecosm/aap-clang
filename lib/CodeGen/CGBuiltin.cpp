@@ -901,6 +901,16 @@ RValue CodeGenFunction::EmitBuiltinExpr(const FunctionDecl *FD,
     return RValue::get(Builder.CreateZExt(V, ConvertType(E->getType())));
   }
 
+  case Builtin::BI__builtin_flt_rounds: {
+    Value *F = CGM.getIntrinsic(Intrinsic::flt_rounds);
+
+    llvm::Type *Ty = ConvertType(E->getType());
+    Value *Result = Builder.CreateCall(F);
+    if (Result->getType() != Ty)
+      Result = Builder.CreateIntCast(Result, Ty, /*isSigned*/true, "cast");
+    return RValue::get(Result);
+  }
+
   case Builtin::BI__builtin_fpclassify: {
     Value *V = EmitScalarExpr(E->getArg(5));
     llvm::Type *Ty = ConvertType(E->getArg(5)->getType());
