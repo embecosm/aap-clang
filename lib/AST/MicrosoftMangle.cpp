@@ -94,7 +94,7 @@ static const DeclContext *getEffectiveDeclContext(const Decl *D) {
     return getEffectiveDeclContext(cast<Decl>(DC));
   }
 
-  return DC;
+  return DC->getRedeclContext();
 }
 
 static const DeclContext *getEffectiveParentContext(const DeclContext *DC) {
@@ -153,7 +153,8 @@ public:
                                        const CXXRecordDecl *DstRD,
                                        raw_ostream &Out) override;
   void mangleCXXThrowInfo(QualType T, bool IsConst, bool IsVolatile,
-                          uint32_t NumEntries, raw_ostream &Out) override;
+                          bool IsUnaligned, uint32_t NumEntries,
+                          raw_ostream &Out) override;
   void mangleCXXCatchableTypeArray(QualType T, uint32_t NumEntries,
                                    raw_ostream &Out) override;
   void mangleCXXCatchableType(QualType T, const CXXConstructorDecl *CD,
@@ -1446,6 +1447,10 @@ void MicrosoftCXXNameMangler::manglePointerExtQualifiers(Qualifiers Quals,
 
   if (HasRestrict)
     Out << 'I';
+
+  if (Quals.hasUnaligned() ||
+      (!PointeeType.isNull() && PointeeType.getLocalQualifiers().hasUnaligned()))
+    Out << 'F';
 }
 
 void MicrosoftCXXNameMangler::manglePointerCVQualifiers(Qualifiers Quals) {
@@ -1577,6 +1582,8 @@ void MicrosoftCXXNameMangler::mangleType(QualType T, SourceRange Range,
     }
     break;
   case QMM_Result:
+    // Presence of __unaligned qualifier shouldn't affect mangling here.
+    Quals.removeUnaligned();
     if ((!IsPointer && Quals) || isa<TagType>(T)) {
       Out << '?';
       mangleQualifiers(Quals, false);
@@ -1717,54 +1724,11 @@ void MicrosoftCXXNameMangler::mangleType(const BuiltinType *T, Qualifiers,
     mangleArtificalTagType(TTK_Struct, "objc_selector");
     break;
 
-  case BuiltinType::OCLImage1d:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image1d");
+#define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
+  case BuiltinType::Id: \
+    Out << "PAUocl_" #ImgType "_" #Suffix "@@"; \
     break;
-  case BuiltinType::OCLImage1dArray:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image1darray");
-    break;
-  case BuiltinType::OCLImage1dBuffer:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image1dbuffer");
-    break;
-  case BuiltinType::OCLImage2d:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2d");
-    break;
-  case BuiltinType::OCLImage2dArray:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2darray");
-    break;
-  case BuiltinType::OCLImage2dDepth:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2ddepth");
-    break;
-  case BuiltinType::OCLImage2dArrayDepth:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2darraydepth");
-    break;
-  case BuiltinType::OCLImage2dMSAA:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2dmsaa");
-    break;
-  case BuiltinType::OCLImage2dArrayMSAA:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2darraymsaa");
-    break;
-  case BuiltinType::OCLImage2dMSAADepth:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2dmsaadepth");
-    break;
-  case BuiltinType::OCLImage2dArrayMSAADepth:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image2darraymsaadepth");
-    break;
-  case BuiltinType::OCLImage3d:
-    Out << "PA";
-    mangleArtificalTagType(TTK_Struct, "ocl_image3d");
-    break;
+#include "clang/Basic/OpenCLImageTypes.def"
   case BuiltinType::OCLSampler:
     Out << "PA";
     mangleArtificalTagType(TTK_Struct, "ocl_sampler");
@@ -1794,6 +1758,7 @@ void MicrosoftCXXNameMangler::mangleType(const BuiltinType *T, Qualifiers,
     Out << "$$T";
     break;
 
+  case BuiltinType::Float128:
   case BuiltinType::Half: {
     DiagnosticsEngine &Diags = Context.getDiags();
     unsigned DiagID = Diags.getCustomDiagID(
@@ -1859,7 +1824,7 @@ void MicrosoftCXXNameMangler::mangleFunctionType(const FunctionType *T,
   // If this is a C++ instance method, mangle the CVR qualifiers for the
   // this pointer.
   if (HasThisQuals) {
-    Qualifiers Quals = Qualifiers::fromCVRMask(Proto->getTypeQuals());
+    Qualifiers Quals = Qualifiers::fromCVRUMask(Proto->getTypeQuals());
     manglePointerExtQualifiers(Quals, /*PointeeType=*/QualType());
     mangleRefQualifier(Proto->getRefQualifier());
     mangleQualifiers(Quals, /*IsMember=*/false);
@@ -2690,9 +2655,9 @@ void MicrosoftMangleContextImpl::mangleCXXVirtualDisplacementMap(
   Mangler.mangleName(DstRD);
 }
 
-void MicrosoftMangleContextImpl::mangleCXXThrowInfo(QualType T,
-                                                    bool IsConst,
+void MicrosoftMangleContextImpl::mangleCXXThrowInfo(QualType T, bool IsConst,
                                                     bool IsVolatile,
+                                                    bool IsUnaligned,
                                                     uint32_t NumEntries,
                                                     raw_ostream &Out) {
   msvc_hashing_ostream MHO(Out);
@@ -2702,6 +2667,8 @@ void MicrosoftMangleContextImpl::mangleCXXThrowInfo(QualType T,
     Mangler.getStream() << 'C';
   if (IsVolatile)
     Mangler.getStream() << 'V';
+  if (IsUnaligned)
+    Mangler.getStream() << 'U';
   Mangler.getStream() << NumEntries;
   Mangler.mangleType(T, SourceRange(), MicrosoftCXXNameMangler::QMM_Result);
 }
@@ -2873,6 +2840,7 @@ void MicrosoftMangleContextImpl::mangleThreadSafeStaticGuardVariable(
 
   Mangler.getStream() << "\01?$TSS" << GuardNum << '@';
   Mangler.mangleNestedName(VD);
+  Mangler.getStream() << "@4HA";
 }
 
 void MicrosoftMangleContextImpl::mangleStaticGuardVariable(const VarDecl *VD,

@@ -1533,7 +1533,15 @@ FinishIdentifier:
     // preprocessor, which may macro expand it or something.
     if (II->isHandleIdentifierCase())
       return PP->HandleIdentifier(Result);
-    
+
+    if (II->getTokenID() == tok::identifier && isCodeCompletionPoint(CurPtr)
+        && II->getPPKeywordID() == tok::pp_not_keyword
+        && II->getObjCKeywordID() == tok::objc_not_keyword) {
+      // Return the code-completion token.
+      Result.setKind(tok::code_completion);
+      cutOffLexing();
+      return true;
+    }
     return true;
   }
 
@@ -2610,7 +2618,7 @@ static const char *FindConflictEnd(const char *CurPtr, const char *BufferEnd,
                                    ConflictMarkerKind CMK) {
   const char *Terminator = CMK == CMK_Perforce ? "<<<<\n" : ">>>>>>>";
   size_t TermLen = CMK == CMK_Perforce ? 5 : 7;
-  StringRef RestOfBuffer(CurPtr+TermLen, BufferEnd-CurPtr-TermLen);
+  auto RestOfBuffer = StringRef(CurPtr, BufferEnd - CurPtr).substr(TermLen);
   size_t Pos = RestOfBuffer.find(Terminator);
   while (Pos != StringRef::npos) {
     // Must occur at start of line.
@@ -2636,8 +2644,8 @@ bool Lexer::IsStartOfConflictMarker(const char *CurPtr) {
     return false;
   
   // Check to see if we have <<<<<<< or >>>>.
-  if ((BufferEnd-CurPtr < 8 || StringRef(CurPtr, 7) != "<<<<<<<") &&
-      (BufferEnd-CurPtr < 6 || StringRef(CurPtr, 5) != ">>>> "))
+  if (!StringRef(CurPtr, BufferEnd - CurPtr).startswith("<<<<<<<") &&
+      !StringRef(CurPtr, BufferEnd - CurPtr).startswith(">>>> "))
     return false;
 
   // If we have a situation where we don't care about conflict markers, ignore

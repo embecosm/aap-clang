@@ -491,9 +491,7 @@ namespace clang {
       // ID 30 used to be a decl update record. These are now in the DECLTYPES
       // block.
       
-      /// \brief Record code for the table of offsets to CXXBaseSpecifier
-      /// sets.
-      CXX_BASE_SPECIFIER_OFFSETS = 31,
+      // ID 31 used to be a list of offsets to DECL_CXX_BASE_SPECIFIERS records.
 
       /// \brief Record code for \#pragma diagnostic mappings.
       DIAG_PRAGMA_MAPPINGS = 32,
@@ -573,9 +571,7 @@ namespace clang {
       /// \brief Record code for potentially unused local typedef names.
       UNUSED_LOCAL_TYPEDEF_NAME_CANDIDATES = 52,
 
-      /// \brief Record code for the table of offsets to CXXCtorInitializers
-      /// lists.
-      CXX_CTOR_INITIALIZERS_OFFSETS = 53,
+      // ID 53 used to be a table of constructor initializer records.
 
       /// \brief Delete expressions that will be analyzed later.
       DELETE_EXPRS_TO_ANALYZE = 54,
@@ -688,6 +684,9 @@ namespace clang {
       /// \brief Specifies a header that is private to this submodule but
       /// must be textually included.
       SUBMODULE_PRIVATE_TEXTUAL_HEADER = 15,
+      /// \brief Specifies some declarations with initializers that must be
+      /// emitted to initialize the module.
+      SUBMODULE_INITIALIZERS = 16,
     };
 
     /// \brief Record types used within a comments block.
@@ -784,44 +783,26 @@ namespace clang {
       PREDEF_TYPE_PSEUDO_OBJECT = 35,
       /// \brief The placeholder type for builtin functions.
       PREDEF_TYPE_BUILTIN_FN = 36,
-      /// \brief OpenCL 1d image type.
-      PREDEF_TYPE_IMAGE1D_ID    = 37,
-      /// \brief OpenCL 1d image array type.
-      PREDEF_TYPE_IMAGE1D_ARR_ID = 38,
-      /// \brief OpenCL 1d image buffer type.
-      PREDEF_TYPE_IMAGE1D_BUFF_ID = 39,
-      /// \brief OpenCL 2d image type.
-      PREDEF_TYPE_IMAGE2D_ID    = 40,
-      /// \brief OpenCL 2d image array type.
-      PREDEF_TYPE_IMAGE2D_ARR_ID = 41,
-      /// \brief OpenCL 2d image depth type.
-      PREDEF_TYPE_IMAGE2D_DEP_ID = 42,
-      /// \brief OpenCL 2d image array depth type.
-      PREDEF_TYPE_IMAGE2D_ARR_DEP_ID = 43,
-      /// \brief OpenCL 2d image MSAA type.
-      PREDEF_TYPE_IMAGE2D_MSAA_ID = 44,
-      /// \brief OpenCL 2d image array MSAA type.
-      PREDEF_TYPE_IMAGE2D_ARR_MSAA_ID = 45,
-      /// \brief OpenCL 2d image MSAA depth type.
-      PREDEF_TYPE_IMAGE2D_MSAA_DEP_ID = 46,
-      /// \brief OpenCL 2d image array MSAA depth type.
-      PREDEF_TYPE_IMAGE2D_ARR_MSAA_DEPTH_ID = 47,
-      /// \brief OpenCL 3d image type.
-      PREDEF_TYPE_IMAGE3D_ID    = 48,
       /// \brief OpenCL event type.
-      PREDEF_TYPE_EVENT_ID      = 49,
+      PREDEF_TYPE_EVENT_ID      = 37,
       /// \brief OpenCL clk event type.
-      PREDEF_TYPE_CLK_EVENT_ID  = 50,
+      PREDEF_TYPE_CLK_EVENT_ID  = 38,
       /// \brief OpenCL sampler type.
-      PREDEF_TYPE_SAMPLER_ID    = 51,
+      PREDEF_TYPE_SAMPLER_ID    = 39,
       /// \brief OpenCL queue type.
-      PREDEF_TYPE_QUEUE_ID      = 52,
+      PREDEF_TYPE_QUEUE_ID      = 40,
       /// \brief OpenCL ndrange type.
-      PREDEF_TYPE_NDRANGE_ID    = 53,
+      PREDEF_TYPE_NDRANGE_ID    = 41,
       /// \brief OpenCL reserve_id type.
-      PREDEF_TYPE_RESERVE_ID_ID = 54,
+      PREDEF_TYPE_RESERVE_ID_ID = 42,
       /// \brief The placeholder type for OpenMP array section.
-      PREDEF_TYPE_OMP_ARRAY_SECTION = 55
+      PREDEF_TYPE_OMP_ARRAY_SECTION = 43,
+      /// \brief The '__float128' type
+      PREDEF_TYPE_FLOAT128_ID = 44,
+      /// \brief OpenCL image types with auto numeration
+#define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
+      PREDEF_TYPE_##Id##_ID,
+#include "clang/Basic/OpenCLImageTypes.def"
     };
 
     /// \brief The number of predefined type IDs that are reserved for
@@ -1005,13 +986,16 @@ namespace clang {
 
       /// \brief The internal '__NSConstantString' tag type.
       PREDEF_DECL_CF_CONSTANT_STRING_TAG_ID = 15,
+
+      /// \brief The internal '__type_pack_element' template.
+      PREDEF_DECL_TYPE_PACK_ELEMENT_ID = 16,
     };
 
     /// \brief The number of declaration IDs that are predefined.
     ///
     /// For more information about predefined declarations, see the
     /// \c PredefinedDeclIDs type and the PREDEF_DECL_*_ID constants.
-    const unsigned int NUM_PREDEF_DECL_IDS = 16;
+    const unsigned int NUM_PREDEF_DECL_IDS = 17;
 
     /// \brief Record of updates for a declaration that was modified after
     /// being deserialized. This can occur within DECLTYPES_BLOCK_ID.
@@ -1072,6 +1056,10 @@ namespace clang {
       DECL_IMPLICIT_PARAM,
       /// \brief A ParmVarDecl record.
       DECL_PARM_VAR,
+      /// \brief A DecompositionDecl record.
+      DECL_DECOMPOSITION,
+      /// \brief A BindingDecl record.
+      DECL_BINDING,
       /// \brief A FileScopeAsmDecl record.
       DECL_FILE_SCOPE_ASM,
       /// \brief A BlockDecl record.
@@ -1105,6 +1093,8 @@ namespace clang {
       DECL_USING,
       /// \brief A UsingShadowDecl record.
       DECL_USING_SHADOW,
+      /// \brief A ConstructorUsingShadowDecl record.
+      DECL_CONSTRUCTOR_USING_SHADOW,
       /// \brief A UsingDirecitveDecl record.
       DECL_USING_DIRECTIVE,
       /// \brief An UnresolvedUsingValueDecl record.
@@ -1119,6 +1109,8 @@ namespace clang {
       DECL_CXX_METHOD,
       /// \brief A CXXConstructorDecl record.
       DECL_CXX_CONSTRUCTOR,
+      /// \brief A CXXConstructorDecl record for an inherited constructor.
+      DECL_CXX_INHERITED_CONSTRUCTOR,
       /// \brief A CXXDestructorDecl record.
       DECL_CXX_DESTRUCTOR,
       /// \brief A CXXConversionDecl record.
@@ -1364,8 +1356,10 @@ namespace clang {
       STMT_OBJC_AT_THROW,
       /// \brief An ObjCAutoreleasePoolStmt record.
       STMT_OBJC_AUTORELEASE_POOL,
-      /// \brief A ObjCBoolLiteralExpr record.
+      /// \brief An ObjCBoolLiteralExpr record.
       EXPR_OBJC_BOOL_LITERAL,
+      /// \brief An ObjCAvailabilityCheckExpr record.
+      EXPR_OBJC_AVAILABILITY_CHECK,
 
       // C++
       
@@ -1382,6 +1376,8 @@ namespace clang {
       EXPR_CXX_MEMBER_CALL,
       /// \brief A CXXConstructExpr record.
       EXPR_CXX_CONSTRUCT,
+      /// \brief A CXXInheritedCtorInitExpr record.
+      EXPR_CXX_INHERITED_CTOR_INIT,
       /// \brief A CXXTemporaryObjectExpr record.
       EXPR_CXX_TEMPORARY_OBJECT,
       /// \brief A CXXStaticCastExpr record.
@@ -1487,6 +1483,13 @@ namespace clang {
       STMT_OMP_TASKLOOP_DIRECTIVE,
       STMT_OMP_TASKLOOP_SIMD_DIRECTIVE,
       STMT_OMP_DISTRIBUTE_DIRECTIVE,
+      STMT_OMP_TARGET_UPDATE_DIRECTIVE,
+      STMT_OMP_DISTRIBUTE_PARALLEL_FOR_DIRECTIVE,
+      STMT_OMP_DISTRIBUTE_PARALLEL_FOR_SIMD_DIRECTIVE,
+      STMT_OMP_DISTRIBUTE_SIMD_DIRECTIVE,
+      STMT_OMP_TARGET_PARALLEL_FOR_SIMD_DIRECTIVE,
+      STMT_OMP_TARGET_SIMD_DIRECTIVE,
+      STMT_OMP_TEAMS_DISTRIBUTE_DIRECTIVE,
       EXPR_OMP_ARRAY_SECTION,
 
       // ARC

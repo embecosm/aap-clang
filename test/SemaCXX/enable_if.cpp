@@ -116,9 +116,9 @@ template <typename T> class C {
   void g() { f(); }
 };
 
-int fn3(bool b) __attribute__((enable_if(b, "")));
+int fn3(bool b) __attribute__((enable_if(b, ""))); // FIXME: This test should net 0 error messages.
 template <class T> void test3() {
-  fn3(sizeof(T) == 1);
+  fn3(sizeof(T) == 1); // expected-error{{no matching function for call to 'fn3'}} expected-note@-2{{candidate disabled}}
 }
 
 template <typename T>
@@ -138,7 +138,7 @@ void test4() {
 void h(int);
 template <typename T> void outer() {
   void local_function() __attribute__((enable_if(::h(T()), "")));
-  local_function();
+  local_function(); // expected-error{{no matching function for call to 'local_function'}} expected-note@-1{{candidate disabled}}
 };
 
 namespace PR20988 {
@@ -158,9 +158,9 @@ namespace PR20988 {
     fn2(expr);  // expected-error{{no matching function for call to 'fn2'}}
   }
 
-  int fn3(bool b) __attribute__((enable_if(b, "")));
+  int fn3(bool b) __attribute__((enable_if(b, ""))); // FIXME: This test should net 0 error messages.
   template <class T> void test3() {
-    fn3(sizeof(T) == 1);
+    fn3(sizeof(T) == 1); // expected-error{{no matching function for call to 'fn3'}} expected-note@-2{{candidate disabled}}
   }
 }
 
@@ -344,5 +344,99 @@ void testIt() {
 
   auto C = (NoMatchTy)foo; // expected-error{{address of overloaded function 'foo' does not match required type 'void ()'}}
   auto CRef = (NoMatchTy)&foo; // expected-error{{address of overloaded function 'foo' does not match required type 'void ()'}}
+}
+}
+
+namespace PR27122 {
+// (slightly reduced) code that motivated the bug...
+namespace ns {
+void Function(int num)
+  __attribute__((enable_if(num != 0, "")));
+void Function(int num, int a0)
+  __attribute__((enable_if(num != 1, "")));
+}  // namespace ns
+
+using ns::Function; // expected-note 3{{declared here}}
+void Run() {
+  Functioon(0); // expected-error{{use of undeclared identifier}} expected-error{{too few arguments}}
+  Functioon(0, 1); // expected-error{{use of undeclared identifier}}
+  Functioon(0, 1, 2); // expected-error{{use of undeclared identifier}}
+}
+
+// Extra tests
+void regularEnableIf(int a) __attribute__((enable_if(a, ""))); // expected-note 3{{declared here}} expected-note 3{{candidate function not viable}}
+void runRegularEnableIf() {
+  regularEnableIf(0, 2); // expected-error{{no matching function}}
+  regularEnableIf(1, 2); // expected-error{{no matching function}}
+  regularEnableIf(); // expected-error{{no matching function}}
+
+  // Test without getting overload resolution involved
+  ::PR27122::regularEnableIf(0, 2); // expected-error{{too many arguments}}
+  ::PR27122::regularEnableIf(1, 2); // expected-error{{too many arguments}}
+  ::PR27122::regularEnableIf(); // expected-error{{too few arguments}}
+}
+
+struct Foo {
+  void bar(int i) __attribute__((enable_if(i, ""))); // expected-note 2{{declared here}}
+};
+
+void runFoo() {
+  Foo f;
+  f.bar(); // expected-error{{too few arguments}}
+  f.bar(1, 2); // expected-error{{too many arguments}}
+}
+}
+
+// Ideally, we should be able to handle value-dependent expressions sanely.
+// Sadly, that isn't the case at the moment.
+namespace dependent {
+int error(int N) __attribute__((enable_if(N, ""))); // expected-note{{candidate disabled}}
+int error(int N) __attribute__((enable_if(!N, ""))); // expected-note{{candidate disabled}}
+template <int N> int callUnavailable() {
+  return error(N); // expected-error{{no matching function for call to 'error'}}
+}
+
+constexpr int noError(int N) __attribute__((enable_if(N, ""))) { return -1; }
+constexpr int noError(int N) __attribute__((enable_if(!N, ""))) { return -1; }
+constexpr int noError(int N) { return 0; }
+
+template <int N>
+constexpr int callNoError() { return noError(N); }
+static_assert(callNoError<0>() == 0, "");
+static_assert(callNoError<1>() == 0, "");
+
+template <int N> constexpr int templated() __attribute__((enable_if(N, ""))) {
+  return 1;
+}
+
+constexpr int A = templated<0>(); // expected-error{{no matching function for call to 'templated'}} expected-note@-4{{candidate disabled}}
+static_assert(templated<1>() == 1, "");
+
+template <int N> constexpr int callTemplated() { return templated<N>(); }
+
+constexpr int B = callTemplated<0>(); // expected-error{{initialized by a constant expression}} expected-error@-2{{no matching function for call to 'templated'}} expected-note{{in instantiation of function template}} expected-note@-9{{candidate disabled}}
+static_assert(callTemplated<1>() == 1, "");
+}
+
+namespace variadic {
+void foo(int a, int b = 0, ...) __attribute__((enable_if(a && b, ""))); // expected-note 6{{disabled}}
+
+void testFoo() {
+  foo(1, 1);
+  foo(1, 1, 2);
+  foo(1, 1, 2, 3);
+
+  foo(1, 0); // expected-error{{no matching}}
+  foo(1, 0, 2); // expected-error{{no matching}}
+  foo(1, 0, 2, 3); // expected-error{{no matching}}
+
+  int m;
+  foo(1, 1);
+  foo(1, 1, m);
+  foo(1, 1, m, 3);
+
+  foo(1, 0); // expected-error{{no matching}}
+  foo(1, 0, m); // expected-error{{no matching}}
+  foo(1, 0, m, 3); // expected-error{{no matching}}
 }
 }

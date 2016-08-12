@@ -26,9 +26,11 @@
 #include "clang/Basic/TargetBuiltins.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/CodeGen/CGFunctionInfo.h"
+#include "clang/CodeGen/SwiftCallingConv.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/InlineAsm.h"
@@ -40,7 +42,7 @@ using namespace CodeGen;
 
 /***/
 
-static unsigned ClangCallConvToLLVMCallConv(CallingConv CC) {
+unsigned CodeGenTypes::ClangCallConvToLLVMCallConv(CallingConv CC) {
   switch (CC) {
   default: return llvm::CallingConv::C;
   case CC_X86StdCall: return llvm::CallingConv::X86_StdCall;
@@ -56,9 +58,10 @@ static unsigned ClangCallConvToLLVMCallConv(CallingConv CC) {
   // TODO: Add support for __vectorcall to LLVM.
   case CC_X86VectorCall: return llvm::CallingConv::X86_VectorCall;
   case CC_SpirFunction: return llvm::CallingConv::SPIR_FUNC;
-  case CC_SpirKernel: return llvm::CallingConv::SPIR_KERNEL;
+  case CC_OpenCLKernel: return CGM.getTargetCodeGenInfo().getOpenCLKernelCallingConv();
   case CC_PreserveMost: return llvm::CallingConv::PreserveMost;
   case CC_PreserveAll: return llvm::CallingConv::PreserveAll;
+  case CC_Swift: return llvm::CallingConv::Swift;
   }
 }
 
@@ -109,7 +112,7 @@ static void appendParameterTypes(const CodeGenTypes &CGT,
     auto protoParamInfos = FPT->getExtParameterInfos();
     paramInfos.reserve(prefix.size() + protoParamInfos.size());
     paramInfos.resize(prefix.size());
-    paramInfos.append(paramInfos.begin(), paramInfos.end());
+    paramInfos.append(protoParamInfos.begin(), protoParamInfos.end());
   }
 
   // Fast path: unknown target.
@@ -139,7 +142,8 @@ arrangeLLVMFunctionInfo(CodeGenTypes &CGT, bool instanceMethod,
                         CanQual<FunctionProtoType> FTP,
                         const FunctionDecl *FD) {
   SmallVector<FunctionProtoType::ExtParameterInfo, 16> paramInfos;
-  RequiredArgs required = RequiredArgs::forPrototypePlus(FTP, prefix.size());
+  RequiredArgs Required =
+      RequiredArgs::forPrototypePlus(FTP, prefix.size(), FD);
   // FIXME: Kill copy.
   appendParameterTypes(CGT, prefix, paramInfos, FTP, FD);
   CanQualType resultType = FTP->getReturnType().getUnqualifiedType();
@@ -147,7 +151,7 @@ arrangeLLVMFunctionInfo(CodeGenTypes &CGT, bool instanceMethod,
   return CGT.arrangeLLVMFunctionInfo(resultType, instanceMethod,
                                      /*chainCall=*/false, prefix,
                                      FTP->getExtInfo(), paramInfos,
-                                     required);
+                                     Required);
 }
 
 /// Arrange the argument and result information for a value of the
@@ -241,6 +245,15 @@ CodeGenTypes::arrangeCXXMethodDeclaration(const CXXMethodDecl *MD) {
   return arrangeFreeFunctionType(prototype, MD);
 }
 
+bool CodeGenTypes::inheritingCtorHasParams(
+    const InheritedConstructor &Inherited, CXXCtorType Type) {
+  // Parameters are unnecessary if we're constructing a base class subobject
+  // and the inherited constructor lives in a virtual base.
+  return Type == Ctor_Complete ||
+         !Inherited.getShadowDecl()->constructsVirtualBase() ||
+         !Target.getCXXABI().hasConstructorVariants();
+  }
+
 const CGFunctionInfo &
 CodeGenTypes::arrangeCXXStructorDeclaration(const CXXMethodDecl *MD,
                                             StructorType Type) {
@@ -249,9 +262,16 @@ CodeGenTypes::arrangeCXXStructorDeclaration(const CXXMethodDecl *MD,
   SmallVector<FunctionProtoType::ExtParameterInfo, 16> paramInfos;
   argTypes.push_back(GetThisType(Context, MD->getParent()));
 
+  bool PassParams = true;
+
   GlobalDecl GD;
   if (auto *CD = dyn_cast<CXXConstructorDecl>(MD)) {
     GD = GlobalDecl(CD, toCXXCtorType(Type));
+
+    // A base class inheriting constructor doesn't get forwarded arguments
+    // needed to construct a virtual base (or base class thereof).
+    if (auto Inherited = CD->getInheritedConstructor())
+      PassParams = inheritingCtorHasParams(Inherited, toCXXCtorType(Type));
   } else {
     auto *DD = dyn_cast<CXXDestructorDecl>(MD);
     GD = GlobalDecl(DD, toCXXDtorType(Type));
@@ -260,12 +280,14 @@ CodeGenTypes::arrangeCXXStructorDeclaration(const CXXMethodDecl *MD,
   CanQual<FunctionProtoType> FTP = GetFormalType(MD);
 
   // Add the formal parameters.
-  appendParameterTypes(*this, argTypes, paramInfos, FTP, MD);
+  if (PassParams)
+    appendParameterTypes(*this, argTypes, paramInfos, FTP, MD);
 
   TheCXXABI.buildStructorSignature(MD, Type, argTypes);
 
   RequiredArgs required =
-      (MD->isVariadic() ? RequiredArgs(argTypes.size()) : RequiredArgs::All);
+      (PassParams && MD->isVariadic() ? RequiredArgs(argTypes.size())
+                                      : RequiredArgs::All);
 
   FunctionType::ExtInfo extInfo = FTP->getExtInfo();
   CanQualType resultType = TheCXXABI.HasThisReturn(GD)
@@ -336,7 +358,7 @@ CodeGenTypes::arrangeCXXConstructorCall(const CallArgList &args,
     ArgTypes.push_back(Context.getCanonicalParamType(Arg.Ty));
 
   CanQual<FunctionProtoType> FPT = GetFormalType(D);
-  RequiredArgs Required = RequiredArgs::forPrototypePlus(FPT, 1 + ExtraArgs);
+  RequiredArgs Required = RequiredArgs::forPrototypePlus(FPT, 1 + ExtraArgs, D);
   GlobalDecl GD(D, CtorKind);
   CanQualType ResultType = TheCXXABI.HasThisReturn(GD)
                                ? ArgTypes.front()
@@ -399,7 +421,7 @@ CodeGenTypes::arrangeObjCMessageSendSignature(const ObjCMethodDecl *MD,
   argTys.push_back(Context.getCanonicalParamType(receiverType));
   argTys.push_back(Context.getCanonicalParamType(Context.getObjCSelType()));
   // FIXME: Kill copy?
-  for (const auto *I : MD->params()) {
+  for (const auto *I : MD->parameters()) {
     argTys.push_back(Context.getCanonicalParamType(I->getType()));
   }
 
@@ -553,10 +575,11 @@ CodeGenTypes::arrangeBlockFunctionDeclaration(const FunctionProtoType *proto,
   auto paramInfos = getExtParameterInfosForCall(proto, 1, params.size());
   auto argTypes = getArgTypesForDeclaration(Context, params);
 
-  return arrangeLLVMFunctionInfo(GetReturnType(proto->getReturnType()),
-                                 /*instanceMethod*/ false, /*chainCall*/ false,
-                                 argTypes, proto->getExtInfo(), paramInfos,
-                                 RequiredArgs::forPrototypePlus(proto, 1));
+  return arrangeLLVMFunctionInfo(
+      GetReturnType(proto->getReturnType()),
+      /*instanceMethod*/ false, /*chainCall*/ false, argTypes,
+      proto->getExtInfo(), paramInfos,
+      RequiredArgs::forPrototypePlus(proto, 1, nullptr));
 }
 
 const CGFunctionInfo &
@@ -589,7 +612,6 @@ CodeGenTypes::arrangeBuiltinFunctionDeclaration(CanQualType resultType,
       resultType, /*instanceMethod=*/false, /*chainCall=*/false,
       argTypes, FunctionType::ExtInfo(), {}, RequiredArgs::All);
 }
-
 
 /// Arrange a call to a C++ method, passing the given arguments.
 const CGFunctionInfo &
@@ -679,7 +701,11 @@ CodeGenTypes::arrangeLLVMFunctionInfo(CanQualType resultType,
   assert(inserted && "Recursively being processed?");
   
   // Compute ABI information.
-  getABIInfo().computeInfo(*FI);
+  if (info.getCC() != CC_Swift) {
+    getABIInfo().computeInfo(*FI);
+  } else {
+    swiftcall::computeABIInfo(CGM, *FI);
+  }
 
   // Loop over all of the computed argument and return value info.  If any of
   // them are direct or extend without a specified coerce type, specify the
@@ -918,7 +944,7 @@ static void forConstantArrayExpansion(CodeGenFunction &CGF,
 }
 
 void CodeGenFunction::ExpandTypeFromArgs(
-    QualType Ty, LValue LV, SmallVectorImpl<llvm::Argument *>::iterator &AI) {
+    QualType Ty, LValue LV, SmallVectorImpl<llvm::Value *>::iterator &AI) {
   assert(LV.isSimple() &&
          "Unexpected non-simple lvalue during struct expansion.");
 
@@ -943,7 +969,7 @@ void CodeGenFunction::ExpandTypeFromArgs(
     }
     for (auto FD : RExp->Fields) {
       // FIXME: What are the right qualifiers here?
-      LValue SubLV = EmitLValueForField(LV, FD);
+      LValue SubLV = EmitLValueForFieldInitialization(LV, FD);
       ExpandTypeFromArgs(FD->getType(), SubLV, AI);
     }
   } else if (isa<ComplexExpansion>(Exp.get())) {
@@ -1706,9 +1732,16 @@ void CodeGenModule::ConstructAttributeList(
                            llvm::toStringRef(CodeGenOpts.SoftFloat));
     FuncAttrs.addAttribute("stack-protector-buffer-size",
                            llvm::utostr(CodeGenOpts.SSPBufferSize));
+    FuncAttrs.addAttribute("no-signed-zeros-fp-math",
+                           llvm::toStringRef(CodeGenOpts.NoSignedZeros));
+    FuncAttrs.addAttribute(
+        "correctly-rounded-divide-sqrt-fp-math",
+        llvm::toStringRef(CodeGenOpts.CorrectlyRoundedDivSqrt));
 
     if (CodeGenOpts.StackRealignment)
       FuncAttrs.addAttribute("stackrealign");
+    if (CodeGenOpts.Backchain)
+      FuncAttrs.addAttribute("backchain");
 
     // Add target-cpu and target-features attributes to functions. If
     // we have a decl for the function and it has a target attribute then
@@ -1763,6 +1796,10 @@ void CodeGenModule::ConstructAttributeList(
     // __syncthreads(), and so can't have certain optimizations applied around
     // them).  LLVM will remove this attribute where it safely can.
     FuncAttrs.addAttribute(llvm::Attribute::Convergent);
+
+    // Respect -fcuda-flush-denormals-to-zero.
+    if (getLangOpts().CUDADeviceFlushDenormalsToZero)
+      FuncAttrs.addAttribute("nvptx-f32ftz", "true");
   }
 
   ClangToLLVMArgMapping IRFunctionArgs(getContext(), FI);
@@ -1813,10 +1850,13 @@ void CodeGenModule::ConstructAttributeList(
         getLLVMContext(), llvm::AttributeSet::ReturnIndex, RetAttrs));
   }
 
+  bool hasUsedSRet = false;
+
   // Attach attributes to sret.
   if (IRFunctionArgs.hasSRetArg()) {
     llvm::AttrBuilder SRETAttrs;
     SRETAttrs.addAttribute(llvm::Attribute::StructRet);
+    hasUsedSRet = true;
     if (RetAI.getInReg())
       SRETAttrs.addAttribute(llvm::Attribute::InReg);
     PAL.push_back(llvm::AttributeSet::get(
@@ -1920,6 +1960,41 @@ void CodeGenModule::ConstructAttributeList(
         Attrs.addAttribute(llvm::Attribute::NonNull);
     }
 
+    switch (FI.getExtParameterInfo(ArgNo).getABI()) {
+    case ParameterABI::Ordinary:
+      break;
+
+    case ParameterABI::SwiftIndirectResult: {
+      // Add 'sret' if we haven't already used it for something, but
+      // only if the result is void.
+      if (!hasUsedSRet && RetTy->isVoidType()) {
+        Attrs.addAttribute(llvm::Attribute::StructRet);
+        hasUsedSRet = true;
+      }
+
+      // Add 'noalias' in either case.
+      Attrs.addAttribute(llvm::Attribute::NoAlias);
+
+      // Add 'dereferenceable' and 'alignment'.
+      auto PTy = ParamType->getPointeeType();
+      if (!PTy->isIncompleteType() && PTy->isConstantSizeType()) {
+        auto info = getContext().getTypeInfoInChars(PTy);
+        Attrs.addDereferenceableAttr(info.first.getQuantity());
+        Attrs.addAttribute(llvm::Attribute::getWithAlignment(getLLVMContext(),
+                                                 info.second.getQuantity()));
+      }
+      break;
+    }
+
+    case ParameterABI::SwiftErrorResult:
+      Attrs.addAttribute(llvm::Attribute::SwiftError);
+      break;
+
+    case ParameterABI::SwiftContext:
+      Attrs.addAttribute(llvm::Attribute::SwiftSelf);
+      break;
+    }
+
     if (Attrs.hasAttributes()) {
       unsigned FirstIRArg, NumIRArgs;
       std::tie(FirstIRArg, NumIRArgs) = IRFunctionArgs.getIRArgs(ArgNo);
@@ -1985,6 +2060,18 @@ static const NonNullAttr *getNonNullAttr(const Decl *FD, const ParmVarDecl *PVD,
   return nullptr;
 }
 
+namespace {
+  struct CopyBackSwiftError final : EHScopeStack::Cleanup {
+    Address Temp;
+    Address Arg;
+    CopyBackSwiftError(Address temp, Address arg) : Temp(temp), Arg(arg) {}
+    void Emit(CodeGenFunction &CGF, Flags flags) override {
+      llvm::Value *errorValue = CGF.Builder.CreateLoad(Temp);
+      CGF.Builder.CreateStore(errorValue, Arg);
+    }
+  };
+}
+
 void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
                                          llvm::Function *Fn,
                                          const FunctionArgList &Args) {
@@ -2010,7 +2097,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
 
   ClangToLLVMArgMapping IRFunctionArgs(CGM.getContext(), FI);
   // Flattened function arguments.
-  SmallVector<llvm::Argument *, 16> FnArgs;
+  SmallVector<llvm::Value *, 16> FnArgs;
   FnArgs.reserve(IRFunctionArgs.totalIRArgs());
   for (auto &Arg : Fn->args()) {
     FnArgs.push_back(&Arg);
@@ -2031,7 +2118,7 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
 
   // Name the struct return parameter.
   if (IRFunctionArgs.hasSRetArg()) {
-    auto AI = FnArgs[IRFunctionArgs.getSRetArgNo()];
+    auto AI = cast<llvm::Argument>(FnArgs[IRFunctionArgs.getSRetArgNo()]);
     AI->setName("agg.result");
     AI->addAttr(llvm::AttributeSet::get(getLLVMContext(), AI->getArgNo() + 1,
                                         llvm::Attribute::NoAlias));
@@ -2119,8 +2206,8 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
           ArgI.getCoerceToType() == ConvertType(Ty) &&
           ArgI.getDirectOffset() == 0) {
         assert(NumIRArgs == 1);
-        auto AI = FnArgs[FirstIRArg];
-        llvm::Value *V = AI;
+        llvm::Value *V = FnArgs[FirstIRArg];
+        auto AI = cast<llvm::Argument>(V);
 
         if (const ParmVarDecl *PVD = dyn_cast<ParmVarDecl>(Arg)) {
           if (getNonNullAttr(CurCodeDecl, PVD, PVD->getType(),
@@ -2188,6 +2275,25 @@ void CodeGenFunction::EmitFunctionProlog(const CGFunctionInfo &FI,
           AI->addAttr(llvm::AttributeSet::get(getLLVMContext(),
                                               AI->getArgNo() + 1,
                                               llvm::Attribute::NoAlias));
+
+        // LLVM expects swifterror parameters to be used in very restricted
+        // ways.  Copy the value into a less-restricted temporary.
+        if (FI.getExtParameterInfo(ArgNo).getABI()
+              == ParameterABI::SwiftErrorResult) {
+          QualType pointeeTy = Ty->getPointeeType();
+          assert(pointeeTy->isPointerType());
+          Address temp =
+            CreateMemTemp(pointeeTy, getPointerAlign(), "swifterror.temp");
+          Address arg = Address(V, getContext().getTypeAlignInChars(pointeeTy));
+          llvm::Value *incomingErrorValue = Builder.CreateLoad(arg);
+          Builder.CreateStore(incomingErrorValue, temp);
+          V = temp.getPointer();
+
+          // Push a cleanup to copy the value back at the end of the function.
+          // The convention does not guarantee that the value will be written
+          // back if the function exits with an unwind exception.
+          EHStack.pushCleanup<CopyBackSwiftError>(NormalCleanup, temp, arg);
+        }
 
         // Ensure the argument is the correct type.
         if (V->getType() != ArgI.getCoerceToType())
@@ -2785,23 +2891,15 @@ void CodeGenFunction::EmitDelegateCallArg(CallArgList &args,
 
   QualType type = param->getType();
 
-  // For the most part, we just need to load the alloca, except:
-  // 1) aggregate r-values are actually pointers to temporaries, and
-  // 2) references to non-scalars are pointers directly to the aggregate.
-  // I don't know why references to scalars are different here.
-  if (const ReferenceType *ref = type->getAs<ReferenceType>()) {
-    if (!hasScalarEvaluationKind(ref->getPointeeType()))
-      return args.add(RValue::getAggregate(local), type);
-
-    // Locals which are references to scalars are represented
-    // with allocas holding the pointer.
-    return args.add(RValue::get(Builder.CreateLoad(local)), type);
-  }
-
   assert(!isInAllocaArgument(CGM.getCXXABI(), type) &&
          "cannot emit delegate call arguments for inalloca arguments!");
 
-  args.add(convertTempToRValue(local, type, loc), type);
+  // For the most part, we just need to load the alloca, except that
+  // aggregate r-values are actually pointers to temporaries.
+  if (type->isReferenceType())
+    args.add(RValue::get(Builder.CreateLoad(local)), type);
+  else
+    args.add(convertTempToRValue(local, type, loc), type);
 }
 
 static bool isProvablyNull(llvm::Value *addr) {
@@ -3112,10 +3210,10 @@ void CodeGenFunction::EmitCallArgs(
     size_t CallArgsStart = Args.size();
     for (int I = ArgTypes.size() - 1; I >= 0; --I) {
       CallExpr::const_arg_iterator Arg = ArgRange.begin() + I;
+      MaybeEmitImplicitObjectSize(I, *Arg);
       EmitCallArg(Args, *Arg, ArgTypes[I]);
       EmitNonNullArgCheck(Args.back().RV, ArgTypes[I], (*Arg)->getExprLoc(),
                           CalleeDecl, ParamsToSkip + I);
-      MaybeEmitImplicitObjectSize(I, *Arg);
     }
 
     // Un-reverse the arguments we just evaluated so they match up with the LLVM
@@ -3481,6 +3579,9 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     }
   }
 
+  Address swiftErrorTemp = Address::invalid();
+  Address swiftErrorArg = Address::invalid();
+
   assert(CallInfo.arg_size() == CallArgs.size() &&
          "Mismatch between function signature & arguments.");
   unsigned ArgNo = 0;
@@ -3587,6 +3688,25 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
         else
           V = Builder.CreateLoad(RV.getAggregateAddress());
 
+        // Implement swifterror by copying into a new swifterror argument.
+        // We'll write back in the normal path out of the call.
+        if (CallInfo.getExtParameterInfo(ArgNo).getABI()
+              == ParameterABI::SwiftErrorResult) {
+          assert(!swiftErrorTemp.isValid() && "multiple swifterror args");
+
+          QualType pointeeTy = I->Ty->getPointeeType();
+          swiftErrorArg =
+            Address(V, getContext().getTypeAlignInChars(pointeeTy));
+
+          swiftErrorTemp =
+            CreateMemTemp(pointeeTy, getPointerAlign(), "swifterror.temp");
+          V = swiftErrorTemp.getPointer();
+          cast<llvm::AllocaInst>(V)->setSwiftError(true);
+
+          llvm::Value *errorValue = Builder.CreateLoad(swiftErrorArg);
+          Builder.CreateStore(errorValue, swiftErrorTemp);
+        }
+
         // We might have to widen integers, but we should never truncate.
         if (ArgInfo.getCoerceToType() != V->getType() &&
             V->getType()->isIntegerTy())
@@ -3597,6 +3717,7 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
         if (FirstIRArg < IRFuncTy->getNumParams() &&
             V->getType() != IRFuncTy->getParamType(FirstIRArg))
           V = Builder.CreateBitCast(V, IRFuncTy->getParamType(FirstIRArg));
+
         IRCallArgs[FirstIRArg] = V;
         break;
       }
@@ -3656,13 +3777,31 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
     }
 
     case ABIArgInfo::CoerceAndExpand: {
-      assert(RV.isAggregate() &&
-             "CoerceAndExpand does not support non-aggregate types yet");
-
       auto coercionType = ArgInfo.getCoerceAndExpandType();
       auto layout = CGM.getDataLayout().getStructLayout(coercionType);
 
-      Address addr = RV.getAggregateAddress();
+      llvm::Value *tempSize = nullptr;
+      Address addr = Address::invalid();
+      if (RV.isAggregate()) {
+        addr = RV.getAggregateAddress();
+      } else {
+        assert(RV.isScalar()); // complex should always just be direct
+
+        llvm::Type *scalarType = RV.getScalarVal()->getType();
+        auto scalarSize = CGM.getDataLayout().getTypeAllocSize(scalarType);
+        auto scalarAlign = CGM.getDataLayout().getPrefTypeAlignment(scalarType);
+
+        tempSize = llvm::ConstantInt::get(CGM.Int64Ty, scalarSize);
+
+        // Materialize to a temporary.
+        addr = CreateTempAlloca(RV.getScalarVal()->getType(),
+                 CharUnits::fromQuantity(std::max(layout->getAlignment(),
+                                                  scalarAlign)));
+        EmitLifetimeStart(scalarSize, addr.getPointer());
+
+        Builder.CreateStore(RV.getScalarVal(), addr);
+      }
+
       addr = Builder.CreateElementBitCast(addr, coercionType);
 
       unsigned IRArgPos = FirstIRArg;
@@ -3674,6 +3813,10 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
         IRCallArgs[IRArgPos++] = elt;
       }
       assert(IRArgPos == FirstIRArg + NumIRArgs);
+
+      if (tempSize) {
+        EmitLifetimeEnd(tempSize, addr.getPointer());
+      }
 
       break;
     }
@@ -3853,6 +3996,12 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
   if (!CI->getType()->isVoidTy())
     CI->setName("call");
 
+  // Perform the swifterror writeback.
+  if (swiftErrorTemp.isValid()) {
+    llvm::Value *errorResult = Builder.CreateLoad(swiftErrorTemp);
+    Builder.CreateStore(errorResult, swiftErrorArg);
+  }
+
   // Emit any writebacks immediately.  Arguably this should happen
   // after any return-value munging.
   if (CallArgs.hasWritebacks())
@@ -3870,15 +4019,6 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
 
   RValue Ret = [&] {
     switch (RetAI.getKind()) {
-    case ABIArgInfo::InAlloca:
-    case ABIArgInfo::Indirect: {
-      RValue ret = convertTempToRValue(SRetPtr, RetTy, SourceLocation());
-      if (UnusedReturnSize)
-        EmitLifetimeEnd(llvm::ConstantInt::get(Int64Ty, UnusedReturnSize),
-                        SRetPtr.getPointer());
-      return ret;
-    }
-
     case ABIArgInfo::CoerceAndExpand: {
       auto coercionType = RetAI.getCoerceAndExpandType();
       auto layout = CGM.getDataLayout().getStructLayout(coercionType);
@@ -3886,15 +4026,31 @@ RValue CodeGenFunction::EmitCall(const CGFunctionInfo &CallInfo,
       Address addr = SRetPtr;
       addr = Builder.CreateElementBitCast(addr, coercionType);
 
+      assert(CI->getType() == RetAI.getUnpaddedCoerceAndExpandType());
+      bool requiresExtract = isa<llvm::StructType>(CI->getType());
+
       unsigned unpaddedIndex = 0;
       for (unsigned i = 0, e = coercionType->getNumElements(); i != e; ++i) {
         llvm::Type *eltType = coercionType->getElementType(i);
         if (ABIArgInfo::isPaddingForCoerceAndExpand(eltType)) continue;
         Address eltAddr = Builder.CreateStructGEP(addr, i, layout);
-        llvm::Value *elt = Builder.CreateExtractValue(CI, unpaddedIndex++);
+        llvm::Value *elt = CI;
+        if (requiresExtract)
+          elt = Builder.CreateExtractValue(elt, unpaddedIndex++);
+        else
+          assert(unpaddedIndex == 0);
         Builder.CreateStore(elt, eltAddr);
       }
-      break;
+      // FALLTHROUGH
+    }
+
+    case ABIArgInfo::InAlloca:
+    case ABIArgInfo::Indirect: {
+      RValue ret = convertTempToRValue(SRetPtr, RetTy, SourceLocation());
+      if (UnusedReturnSize)
+        EmitLifetimeEnd(llvm::ConstantInt::get(Int64Ty, UnusedReturnSize),
+                        SRetPtr.getPointer());
+      return ret;
     }
 
     case ABIArgInfo::Ignore:

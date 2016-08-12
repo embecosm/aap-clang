@@ -1277,7 +1277,6 @@ ParsedType Parser::ParseObjCTypeName(ObjCDeclSpec &DS,
     if (context == Declarator::ObjCResultContext)
       dsContext = DSC_objc_method_result;
     ParseSpecifierQualifierList(declSpec, AS_none, dsContext);
-    declSpec.SetRangeEnd(Tok.getLocation());
     Declarator declarator(declSpec, context);
     ParseDeclarator(declarator);
 
@@ -1693,11 +1692,18 @@ void Parser::parseObjCTypeArgsOrProtocolQualifiers(
     return;
   }
 
-  // We syntactically matched a type argument, so commit to parsing
-  // type arguments.
+  // We parsed an identifier list but stumbled into non single identifiers, this
+  // means we might (a) check that what we already parsed is a legitimate type
+  // (not a protocol or unknown type) and (b) parse the remaining ones, which
+  // must all be type args.
 
   // Convert the identifiers into type arguments.
   bool invalid = false;
+  IdentifierInfo *foundProtocolId = nullptr, *foundValidTypeId = nullptr;
+  SourceLocation foundProtocolSrcLoc, foundValidTypeSrcLoc;
+  SmallVector<IdentifierInfo *, 2> unknownTypeArgs;
+  SmallVector<SourceLocation, 2> unknownTypeArgsLoc;
+
   for (unsigned i = 0, n = identifiers.size(); i != n; ++i) {
     ParsedType typeArg
       = Actions.getTypeName(*identifiers[i], identifierLocs[i], getCurScope());
@@ -1711,17 +1717,32 @@ void Parser::parseObjCTypeArgsOrProtocolQualifiers(
       // Form a declarator to turn this into a type.
       Declarator D(DS, Declarator::TypeNameContext);
       TypeResult fullTypeArg = Actions.ActOnTypeName(getCurScope(), D);
-      if (fullTypeArg.isUsable())
+      if (fullTypeArg.isUsable()) {
         typeArgs.push_back(fullTypeArg.get());
-      else
+        if (!foundValidTypeId) {
+          foundValidTypeId = identifiers[i];
+          foundValidTypeSrcLoc = identifierLocs[i];
+        }
+      } else {
         invalid = true;
+        unknownTypeArgs.push_back(identifiers[i]);
+        unknownTypeArgsLoc.push_back(identifierLocs[i]);
+      }
     } else {
       invalid = true;
+      if (!Actions.LookupProtocol(identifiers[i], identifierLocs[i])) {
+        unknownTypeArgs.push_back(identifiers[i]);
+        unknownTypeArgsLoc.push_back(identifierLocs[i]);
+      } else if (!foundProtocolId) {
+        foundProtocolId = identifiers[i];
+        foundProtocolSrcLoc = identifierLocs[i];
+      }
     }
   }
 
   // Continue parsing type-names.
   do {
+    Token CurTypeTok = Tok;
     TypeResult typeArg = ParseTypeName();
 
     // Consume the '...' for a pack expansion.
@@ -1733,10 +1754,27 @@ void Parser::parseObjCTypeArgsOrProtocolQualifiers(
 
     if (typeArg.isUsable()) {
       typeArgs.push_back(typeArg.get());
+      if (!foundValidTypeId) {
+        foundValidTypeId = CurTypeTok.getIdentifierInfo();
+        foundValidTypeSrcLoc = CurTypeTok.getLocation();
+      }
     } else {
       invalid = true;
     }
   } while (TryConsumeToken(tok::comma));
+
+  // Diagnose the mix between type args and protocols.
+  if (foundProtocolId && foundValidTypeId)
+    Actions.DiagnoseTypeArgsAndProtocols(foundProtocolId, foundProtocolSrcLoc,
+                                         foundValidTypeId,
+                                         foundValidTypeSrcLoc);
+
+  // Diagnose unknown arg types.
+  ParsedType T;
+  if (unknownTypeArgs.size())
+    for (unsigned i = 0, e = unknownTypeArgsLoc.size(); i < e; ++i)
+      Actions.DiagnoseUnknownTypeName(unknownTypeArgs[i], unknownTypeArgsLoc[i],
+                                      getCurScope(), nullptr, T);
 
   // Parse the closing '>'.
   SourceLocation rAngleLoc;
@@ -2618,6 +2656,12 @@ Parser::ParseObjCAutoreleasePoolStmt(SourceLocation atLoc) {
 /// StashAwayMethodOrFunctionBodyTokens -  Consume the tokens and store them 
 /// for later parsing.
 void Parser::StashAwayMethodOrFunctionBodyTokens(Decl *MDecl) {
+  if (SkipFunctionBodies && (!MDecl || Actions.canSkipFunctionBody(MDecl)) &&
+      trySkippingFunctionBody()) {
+    Actions.ActOnSkippedFunctionBody(MDecl);
+    return;
+  }
+
   LexedMethod* LM = new LexedMethod(this, MDecl);
   CurParsedObjCImpl->LateParsedObjCMethods.push_back(LM);
   CachedTokens &Toks = LM->Toks;
@@ -2814,6 +2858,8 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
       return ParsePostfixExpressionSuffix(ParseObjCProtocolExpression(AtLoc));
     case tok::objc_selector:
       return ParsePostfixExpressionSuffix(ParseObjCSelectorExpression(AtLoc));
+    case tok::objc_available:
+      return ParseAvailabilityCheckExpr(AtLoc);
       default: {
         const char *str = nullptr;
         if (GetLookAheadToken(1).is(tok::l_brace)) {
@@ -3370,6 +3416,7 @@ ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
   ExprVector ElementExprs;                   // array elements.
   ConsumeBracket(); // consume the l_square.
 
+  bool HasInvalidEltExpr = false;
   while (Tok.isNot(tok::r_square)) {
     // Parse list of array element expressions (all must be id types).
     ExprResult Res(ParseAssignmentExpression());
@@ -3381,11 +3428,15 @@ ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
       return Res;
     }    
     
+    Res = Actions.CorrectDelayedTyposInExpr(Res.get());
+    if (Res.isInvalid())
+      HasInvalidEltExpr = true;
+
     // Parse the ellipsis that indicates a pack expansion.
     if (Tok.is(tok::ellipsis))
       Res = Actions.ActOnPackExpansion(Res.get(), ConsumeToken());    
     if (Res.isInvalid())
-      return true;
+      HasInvalidEltExpr = true;
 
     ElementExprs.push_back(Res.get());
 
@@ -3396,6 +3447,10 @@ ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
                                                             << tok::comma);
   }
   SourceLocation EndLoc = ConsumeBracket(); // location of ']'
+
+  if (HasInvalidEltExpr)
+    return ExprError();
+
   MultiExprArg Args(ElementExprs);
   return Actions.BuildObjCArrayLiteral(SourceRange(AtLoc, EndLoc), Args);
 }
@@ -3403,6 +3458,7 @@ ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
 ExprResult Parser::ParseObjCDictionaryLiteral(SourceLocation AtLoc) {
   SmallVector<ObjCDictionaryElement, 4> Elements; // dictionary elements.
   ConsumeBrace(); // consume the l_square.
+  bool HasInvalidEltExpr = false;
   while (Tok.isNot(tok::r_brace)) {
     // Parse the comma separated key : value expressions.
     ExprResult KeyExpr;
@@ -3432,7 +3488,15 @@ ExprResult Parser::ParseObjCDictionaryLiteral(SourceLocation AtLoc) {
       return ValueExpr;
     }
     
-    // Parse the ellipsis that designates this as a pack expansion.
+    // Check the key and value for possible typos
+    KeyExpr = Actions.CorrectDelayedTyposInExpr(KeyExpr.get());
+    ValueExpr = Actions.CorrectDelayedTyposInExpr(ValueExpr.get());
+    if (KeyExpr.isInvalid() || ValueExpr.isInvalid())
+      HasInvalidEltExpr = true;
+
+    // Parse the ellipsis that designates this as a pack expansion. Do not
+    // ActOnPackExpansion here, leave it to template instantiation time where
+    // we can get better diagnostics.
     SourceLocation EllipsisLoc;
     if (getLangOpts().CPlusPlus)
       TryConsumeToken(tok::ellipsis, EllipsisLoc);
@@ -3449,6 +3513,9 @@ ExprResult Parser::ParseObjCDictionaryLiteral(SourceLocation AtLoc) {
                                                             << tok::comma);
   }
   SourceLocation EndLoc = ConsumeBrace();
+
+  if (HasInvalidEltExpr)
+    return ExprError();
   
   // Create the ObjCDictionaryLiteral.
   return Actions.BuildObjCDictionaryLiteral(SourceRange(AtLoc, EndLoc),
@@ -3612,6 +3679,8 @@ void Parser::ParseLexedObjCMethodDefs(LexedMethod &LM, bool parseMethod) {
   else {
     if (Tok.is(tok::colon))
       ParseConstructorInitializer(MCDecl);
+    else
+      Actions.ActOnDefaultCtorInitializers(MCDecl);
     ParseFunctionStatementBody(MCDecl, BodyScope);
   }
   

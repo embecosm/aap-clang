@@ -50,6 +50,18 @@ public:
   /// \param IsSystem Whether this is a module map from a system include path.
   virtual void moduleMapFileRead(SourceLocation FileStart,
                                  const FileEntry &File, bool IsSystem) {}
+
+  /// \brief Called when a header is added during module map parsing.
+  ///
+  /// \param Filename The header file itself.
+  virtual void moduleMapAddHeader(StringRef Filename) {}
+
+  /// \brief Called when an umbrella header is added during module map parsing.
+  ///
+  /// \param FileMgr FileManager instance
+  /// \param Header The umbrella header to collect.
+  virtual void moduleMapAddUmbrellaHeader(FileManager *FileMgr,
+                                          const FileEntry *Header) {}
 };
   
 class ModuleMap {
@@ -123,6 +135,12 @@ public:
     /// \brief Whether this header is available in the module.
     bool isAvailable() const {
       return getModule()->isAvailable();
+    }
+
+    /// \brief Whether this header is accessible from the specified module.
+    bool isAccessibleFrom(Module *M) const {
+      return !(getRole() & PrivateHeader) ||
+             (M && M->getTopLevelModule() == getModule()->getTopLevelModule());
     }
 
     // \brief Whether this known header is valid (i.e., it has an
