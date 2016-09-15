@@ -427,7 +427,7 @@ def err_synthesized_property_name : Error<
   "expected a property name in @synthesize">;
 def warn_semicolon_before_method_body : Warning<
   "semicolon before method body is ignored">,
-  InGroup<DiagGroup<"semicolon-before-method-body">>, DefaultIgnore;
+  InGroup<SemiBeforeMethodBody>, DefaultIgnore;
 def note_extra_comma_message_arg : Note<
   "comma separating Objective-C messaging arguments">;
 
@@ -911,6 +911,10 @@ def warn_pragma_invalid_action : Warning<
 def warn_pragma_pack_malformed : Warning<
   "expected integer or identifier in '#pragma pack' - ignored">,
   InGroup<IgnoredPragmas>;
+// - #pragma intrinsic
+def warn_pragma_intrinsic_builtin : Warning<
+  "%0 is not a recognized builtin%select{|; consider including <intrin.h> to access non-builtin intrinsics}1">,
+  InGroup<IgnoredPragmas>;
 // - #pragma unused
 def warn_pragma_unused_expected_var : Warning<
   "expected '#pragma unused' argument to be a variable name">,
@@ -1021,6 +1025,10 @@ def warn_pragma_unroll_cuda_value_in_parens : Warning<
 } // end of Parse Issue category.
 
 let CategoryName = "Modules Issue" in {
+def err_expected_module_interface_decl : Error<
+  "expected module declaration at start of module interface">;
+def err_unexpected_module_decl : Error<
+  "module declaration must be the first declaration in the translation unit">;
 def err_module_expected_ident : Error<
   "expected a module name after module%select{| import}0">;
 def err_unexpected_module_kind : Error<
@@ -1032,6 +1040,8 @@ def err_attribute_not_import_attr : Error<
 def err_module_expected_semi : Error<
   "expected ';' after module name">;
 def err_missing_before_module_end : Error<"expected %0 at end of module">;
+
+def err_export_empty : Error<"export declaration cannot be empty">;
 }
 
 let CategoryName = "Generics Issue" in {

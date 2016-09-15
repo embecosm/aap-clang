@@ -483,15 +483,13 @@ bool Sema::DiagnoseUninstantiableTemplate(SourceLocation PointOfInstantiation,
     return false;
   }
 
+  if (!Complain || (PatternDef && PatternDef->isInvalidDecl()))
+    return true;
 
   QualType InstantiationTy;
   if (TagDecl *TD = dyn_cast<TagDecl>(Instantiation))
     InstantiationTy = Context.getTypeDeclType(TD);
-  else
-    InstantiationTy = cast<FunctionDecl>(Instantiation)->getType();
-  if (!Complain || (PatternDef && PatternDef->isInvalidDecl())) {
-    // Say nothing
-  } else if (PatternDef) {
+  if (PatternDef) {
     Diag(PointOfInstantiation,
          diag::err_template_instantiate_within_definition)
       << (TSK != TSK_ImplicitInstantiation)
@@ -500,15 +498,30 @@ bool Sema::DiagnoseUninstantiableTemplate(SourceLocation PointOfInstantiation,
     // we're lexically inside it.
     Instantiation->setInvalidDecl();
   } else if (InstantiatedFromMember) {
-    Diag(PointOfInstantiation,
-         diag::err_implicit_instantiate_member_undefined)
-      << InstantiationTy;
-    Diag(Pattern->getLocation(), diag::note_member_declared_at);
+    if (isa<FunctionDecl>(Instantiation)) {
+      Diag(PointOfInstantiation,
+           diag::err_explicit_instantiation_undefined_member)
+        << 1 << Instantiation->getDeclName() << Instantiation->getDeclContext();
+    } else {
+      Diag(PointOfInstantiation,
+           diag::err_implicit_instantiate_member_undefined)
+        << InstantiationTy;
+    }
+    Diag(Pattern->getLocation(), isa<FunctionDecl>(Instantiation)
+                                     ? diag::note_explicit_instantiation_here
+                                     : diag::note_member_declared_at);
   } else {
-    Diag(PointOfInstantiation, diag::err_template_instantiate_undefined)
-      << (TSK != TSK_ImplicitInstantiation)
-      << InstantiationTy;
-    Diag(Pattern->getLocation(), diag::note_template_decl_here);
+    if (isa<FunctionDecl>(Instantiation))
+      Diag(PointOfInstantiation,
+           diag::err_explicit_instantiation_undefined_func_template)
+        << Pattern;
+    else
+      Diag(PointOfInstantiation, diag::err_template_instantiate_undefined)
+        << (TSK != TSK_ImplicitInstantiation)
+        << InstantiationTy;
+    Diag(Pattern->getLocation(), isa<FunctionDecl>(Instantiation)
+                                     ? diag::note_explicit_instantiation_here
+                                     : diag::note_template_decl_here);
   }
 
   // In general, Instantiation isn't marked invalid to get more than one
@@ -3316,7 +3329,7 @@ SubstDefaultTemplateArgument(Sema &SemaRef,
   // on the previously-computed template arguments.
   if (ArgType->getType()->isDependentType()) {
     Sema::InstantiatingTemplate Inst(SemaRef, TemplateLoc,
-                                     Template, Converted,
+                                     Param, Template, Converted,
                                      SourceRange(TemplateLoc, RAngleLoc));
     if (Inst.isInvalid())
       return nullptr;
@@ -3368,7 +3381,7 @@ SubstDefaultTemplateArgument(Sema &SemaRef,
                              NonTypeTemplateParmDecl *Param,
                         SmallVectorImpl<TemplateArgument> &Converted) {
   Sema::InstantiatingTemplate Inst(SemaRef, TemplateLoc,
-                                   Template, Converted,
+                                   Param, Template, Converted,
                                    SourceRange(TemplateLoc, RAngleLoc));
   if (Inst.isInvalid())
     return ExprError();
@@ -3419,8 +3432,9 @@ SubstDefaultTemplateArgument(Sema &SemaRef,
                              TemplateTemplateParmDecl *Param,
                        SmallVectorImpl<TemplateArgument> &Converted,
                              NestedNameSpecifierLoc &QualifierLoc) {
-  Sema::InstantiatingTemplate Inst(SemaRef, TemplateLoc, Template, Converted,
-                                   SourceRange(TemplateLoc, RAngleLoc));
+  Sema::InstantiatingTemplate Inst(
+      SemaRef, TemplateLoc, TemplateParameter(Param), Template, Converted,
+      SourceRange(TemplateLoc, RAngleLoc));
   if (Inst.isInvalid())
     return TemplateName();
 
@@ -4041,7 +4055,9 @@ bool Sema::CheckTemplateArgumentList(TemplateDecl *Template,
     }
 
     // Introduce an instantiation record that describes where we are using
-    // the default template argument.
+    // the default template argument. We're not actually instantiating a
+    // template here, we just create this object to put a note into the
+    // context stack.
     InstantiatingTemplate Inst(*this, RAngleLoc, Template, *Param, Converted,
                                SourceRange(TemplateLoc, RAngleLoc));
     if (Inst.isInvalid())
@@ -5876,9 +5892,7 @@ Sema::CheckTemplateDeclScope(Scope *S, TemplateParameterList *TemplateParams) {
   if (Ctx && Ctx->isExternCContext())
     return Diag(TemplateParams->getTemplateLoc(), diag::err_template_linkage)
              << TemplateParams->getSourceRange();
-
-  while (Ctx && isa<LinkageSpecDecl>(Ctx))
-    Ctx = Ctx->getParent();
+  Ctx = Ctx->getRedeclContext();
 
   // C++ [temp]p2:
   //   A template-declaration can appear only as a namespace scope or
@@ -6805,13 +6819,7 @@ Sema::CheckSpecializationInstantiationRedecl(SourceLocation NewLoc,
       //   instantiation of a template appears after a declaration of
       //   an explicit specialization for that template, the explicit
       //   instantiation has no effect.
-      //
-      // In C++98/03 mode, we only give an extension warning here, because it
-      // is not harmful to try to explicitly instantiate something that
-      // has been explicitly specialized.
-      Diag(NewLoc, getLangOpts().CPlusPlus11 ?
-           diag::warn_cxx98_compat_explicit_instantiation_after_specialization :
-           diag::ext_explicit_instantiation_after_specialization)
+      Diag(NewLoc, diag::warn_explicit_instantiation_after_specialization)
         << PrevDecl;
       Diag(PrevDecl->getLocation(),
            diag::note_previous_template_specialization);

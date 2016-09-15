@@ -169,6 +169,9 @@ def warn_drv_optimization_value : Warning<"optimization level '%0' is not suppor
   InGroup<InvalidCommandLineArgument>;
 def warn_ignored_gcc_optimization : Warning<"optimization flag '%0' is not supported">,
   InGroup<IgnoredOptimizationArgument>;
+def warn_drv_unsupported_opt_for_target : Warning<
+  "optimization flag '%0' is not supported for target '%1'">,
+  InGroup<IgnoredOptimizationArgument>;
 def warn_c_kext : Warning<
   "ignoring -fapple-kext which is valid for C++ and Objective-C++ only">;
 def warn_drv_input_file_unused : Warning<
@@ -185,6 +188,9 @@ def warn_drv_unused_argument : Warning<
   InGroup<UnusedCommandLineArgument>;
 def warn_drv_empty_joined_argument : Warning<
   "joined argument expects additional value: '%0'">,
+  InGroup<UnusedCommandLineArgument>;
+def warn_drv_fdiagnostics_show_hotness_requires_pgo : Warning<
+  "argument '-fdiagnostics-show-hotness' requires profile-guided optimization information">,
   InGroup<UnusedCommandLineArgument>;
 def warn_drv_clang_unsupported : Warning<
   "the clang compiler does not support '%0'">;
