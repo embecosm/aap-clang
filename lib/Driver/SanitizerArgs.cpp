@@ -437,6 +437,18 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
                  TC.getTriple().getArch() == llvm::Triple::x86_64);
   }
 
+  if (AllAddedKinds & Thread) {
+    TsanMemoryAccess = Args.hasFlag(options::OPT_fsanitize_thread_memory_access,
+                                    options::OPT_fno_sanitize_thread_memory_access,
+                                    TsanMemoryAccess);
+    TsanFuncEntryExit = Args.hasFlag(options::OPT_fsanitize_thread_func_entry_exit,
+                                     options::OPT_fno_sanitize_thread_func_entry_exit,
+                                     TsanFuncEntryExit);
+    TsanAtomics = Args.hasFlag(options::OPT_fsanitize_thread_atomics,
+                               options::OPT_fno_sanitize_thread_atomics,
+                               TsanAtomics);
+  }
+
   if (AllAddedKinds & CFI) {
     CfiCrossDso = Args.hasFlag(options::OPT_fsanitize_cfi_cross_dso,
                                options::OPT_fno_sanitize_cfi_cross_dso, false);
@@ -559,14 +571,13 @@ SanitizerArgs::SanitizerArgs(const ToolChain &TC,
         D.Diag(clang::diag::note_drv_address_sanitizer_debug_runtime);
       }
     }
-  }
 
-  AsanUseAfterScope =
-      Args.hasArg(options::OPT_fsanitize_address_use_after_scope);
-  if (AsanUseAfterScope && !(AllAddedKinds & Address)) {
-    D.Diag(clang::diag::err_drv_argument_only_allowed_with)
-        << "-fsanitize-address-use-after-scope"
-        << "-fsanitize=address";
+    if (Arg *A = Args.getLastArg(
+            options::OPT_fsanitize_address_use_after_scope,
+            options::OPT_fno_sanitize_address_use_after_scope)) {
+      AsanUseAfterScope = A->getOption().getID() ==
+                          options::OPT_fsanitize_address_use_after_scope;
+    }
   }
 
   // Parse -link-cxx-sanitizer flag.
@@ -608,6 +619,12 @@ static void addIncludeLinkerOption(const ToolChain &TC,
 void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
                             llvm::opt::ArgStringList &CmdArgs,
                             types::ID InputType) const {
+  // NVPTX doesn't currently support sanitizers.  Bailing out here means that
+  // e.g. -fsanitize=address applies only to host code, which is what we want
+  // for now.
+  if (TC.getTriple().isNVPTX())
+    return;
+
   // Translate available CoverageFeatures to corresponding clang-cc1 flags.
   // Do it even if Sanitizers.empty() since some forms of coverage don't require
   // sanitizers.
@@ -679,6 +696,22 @@ void SanitizerArgs::addArgs(const ToolChain &TC, const llvm::opt::ArgList &Args,
 
   if (MsanUseAfterDtor)
     CmdArgs.push_back(Args.MakeArgString("-fsanitize-memory-use-after-dtor"));
+
+  // FIXME: Pass these parameters as function attributes, not as -llvm flags.
+  if (!TsanMemoryAccess) {
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-tsan-instrument-memory-accesses=0");
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-tsan-instrument-memintrinsics=0");
+  }
+  if (!TsanFuncEntryExit) {
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-tsan-instrument-func-entry-exit=0");
+  }
+  if (!TsanAtomics) {
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-tsan-instrument-atomics=0");
+  }
 
   if (CfiCrossDso)
     CmdArgs.push_back(Args.MakeArgString("-fsanitize-cfi-cross-dso"));
