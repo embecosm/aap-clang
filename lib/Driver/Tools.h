@@ -60,6 +60,8 @@ private:
                                const InputInfo &Output,
                                const InputInfoList &Inputs) const;
 
+  void AddAAPTargetArgs(const llvm::opt::ArgList &Args,
+                        llvm::opt::ArgStringList &CmdArgs) const;
   void AddAArch64TargetArgs(const llvm::opt::ArgList &Args,
                             llvm::opt::ArgStringList &CmdArgs) const;
   void AddARMTargetArgs(const llvm::Triple &Triple,
