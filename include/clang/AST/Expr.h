@@ -115,6 +115,7 @@ protected:
     ExprBits.InstantiationDependent = ID;
     ExprBits.ValueKind = VK;
     ExprBits.ObjectKind = OK;
+    assert(ExprBits.ObjectKind == OK && "truncated kind");
     ExprBits.ContainsUnexpandedParameterPack = ContainsUnexpandedParameterPack;
     setType(T);
   }
@@ -651,7 +652,8 @@ public:
   /// constant.
   bool EvaluateWithSubstitution(APValue &Value, ASTContext &Ctx,
                                 const FunctionDecl *Callee,
-                                ArrayRef<const Expr*> Args) const;
+                                ArrayRef<const Expr*> Args,
+                                const Expr *This = nullptr) const;
 
   /// \brief If the current Expr is a pointer, this will try to statically
   /// determine the number of bytes available where the pointer is pointing.

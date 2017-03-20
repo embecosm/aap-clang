@@ -562,8 +562,7 @@ std::string PredefinedExpr::ComputeName(IdentType IT, const Decl *CurrentDecl) {
       FT = dyn_cast<FunctionProtoType>(AFT);
 
     if (IT == FuncSig) {
-      assert(FT && "We must have a written prototype in this case.");
-      switch (FT->getCallConv()) {
+      switch (AFT->getCallConv()) {
       case CC_C: POut << "__cdecl "; break;
       case CC_X86StdCall: POut << "__stdcall "; break;
       case CC_X86FastCall: POut << "__fastcall "; break;
@@ -587,12 +586,15 @@ std::string PredefinedExpr::ComputeName(IdentType IT, const Decl *CurrentDecl) {
       if (FT->isVariadic()) {
         if (FD->getNumParams()) POut << ", ";
         POut << "...";
+      } else if ((IT == FuncSig || !Context.getLangOpts().CPlusPlus) &&
+                 !Decl->getNumParams()) {
+        POut << "void";
       }
     }
     POut << ")";
 
     if (const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(FD)) {
-      const FunctionType *FT = MD->getType()->castAs<FunctionType>();
+      assert(FT && "We must have a written prototype in this case.");
       if (FT->isConst())
         POut << " const";
       if (FT->isVolatile())
@@ -1569,8 +1571,9 @@ bool CastExpr::CastConsistency() const {
     goto CheckNoBasePath;
 
   case CK_AddressSpaceConversion:
-    assert(getType()->isPointerType());
-    assert(getSubExpr()->getType()->isPointerType());
+    assert(getType()->isPointerType() || getType()->isBlockPointerType());
+    assert(getSubExpr()->getType()->isPointerType() ||
+           getSubExpr()->getType()->isBlockPointerType());
     assert(getType()->getPointeeType().getAddressSpace() !=
            getSubExpr()->getType()->getPointeeType().getAddressSpace());
   // These should not have an inheritance path.
@@ -1877,6 +1880,11 @@ bool InitListExpr::isTransparent() const {
   // Otherwise, we're sugar if and only if we have exactly one initializer that
   // is of the same type.
   if (getNumInits() != 1 || !getInit(0))
+    return false;
+
+  // Don't confuse aggregate initialization of a struct X { X &x; }; with a
+  // transparent struct copy.
+  if (!getInit(0)->isRValue() && getType()->isRecordType())
     return false;
 
   return getType().getCanonicalType() ==
@@ -2950,6 +2958,7 @@ bool Expr::HasSideEffects(const ASTContext &Ctx,
   case CXXNewExprClass:
   case CXXDeleteExprClass:
   case CoawaitExprClass:
+  case DependentCoawaitExprClass:
   case CoyieldExprClass:
     // These always have a side-effect.
     return true;

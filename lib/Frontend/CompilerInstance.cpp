@@ -57,17 +57,15 @@ CompilerInstance::CompilerInstance(
     std::shared_ptr<PCHContainerOperations> PCHContainerOps,
     bool BuildingModule)
     : ModuleLoader(BuildingModule), Invocation(new CompilerInvocation()),
-      ModuleManager(nullptr),
-      ThePCHContainerOperations(std::move(PCHContainerOps)),
-      BuildGlobalModuleIndex(false), HaveFullGlobalModuleIndex(false),
-      ModuleBuildFailed(false) {}
+      ThePCHContainerOperations(std::move(PCHContainerOps)) {}
 
 CompilerInstance::~CompilerInstance() {
   assert(OutputFiles.empty() && "Still output files in flight?");
 }
 
-void CompilerInstance::setInvocation(CompilerInvocation *Value) {
-  Invocation = Value;
+void CompilerInstance::setInvocation(
+    std::shared_ptr<CompilerInvocation> Value) {
+  Invocation = std::move(Value);
 }
 
 bool CompilerInstance::shouldBuildGlobalModuleIndex() const {
@@ -96,7 +94,9 @@ void CompilerInstance::setSourceManager(SourceManager *Value) {
   SourceMgr = Value;
 }
 
-void CompilerInstance::setPreprocessor(Preprocessor *Value) { PP = Value; }
+void CompilerInstance::setPreprocessor(std::shared_ptr<Preprocessor> Value) {
+  PP = std::move(Value);
+}
 
 void CompilerInstance::setASTContext(ASTContext *Value) {
   Context = Value;
@@ -365,14 +365,13 @@ void CompilerInstance::createPreprocessor(TranslationUnitKind TUKind) {
     PTHMgr = PTHManager::Create(PPOpts.TokenCache, getDiagnostics());
 
   // Create the Preprocessor.
-  HeaderSearch *HeaderInfo = new HeaderSearch(&getHeaderSearchOpts(),
-                                              getSourceManager(),
-                                              getDiagnostics(),
-                                              getLangOpts(),
-                                              &getTarget());
-  PP = new Preprocessor(&getPreprocessorOpts(), getDiagnostics(), getLangOpts(),
-                        getSourceManager(), *HeaderInfo, *this, PTHMgr,
-                        /*OwnsHeaderSearch=*/true, TUKind);
+  HeaderSearch *HeaderInfo =
+      new HeaderSearch(getHeaderSearchOptsPtr(), getSourceManager(),
+                       getDiagnostics(), getLangOpts(), &getTarget());
+  PP = std::make_shared<Preprocessor>(
+      Invocation->getPreprocessorOptsPtr(), getDiagnostics(), getLangOpts(),
+      getSourceManager(), *HeaderInfo, *this, PTHMgr,
+      /*OwnsHeaderSearch=*/true, TUKind);
   PP->Initialize(getTarget(), getAuxTarget());
 
   // Note that this is different then passing PTHMgr to Preprocessor's ctor.
@@ -498,7 +497,7 @@ IntrusiveRefCntPtr<ASTReader> CompilerInstance::createPCHExternalASTSource(
     StringRef Path, StringRef Sysroot, bool DisablePCHValidation,
     bool AllowPCHWithCompilerErrors, Preprocessor &PP, ASTContext &Context,
     const PCHContainerReader &PCHContainerRdr,
-    ArrayRef<IntrusiveRefCntPtr<ModuleFileExtension>> Extensions,
+    ArrayRef<std::shared_ptr<ModuleFileExtension>> Extensions,
     void *DeserializationListener, bool OwnDeserializationListener,
     bool Preamble, bool UseGlobalModuleIndex) {
   HeaderSearchOptions &HSOpts = PP.getHeaderSearchInfo().getHeaderSearchOpts();
@@ -1018,8 +1017,8 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
     = ImportingInstance.getPreprocessor().getHeaderSearchInfo().getModuleMap();
     
   // Construct a compiler invocation for creating this module.
-  IntrusiveRefCntPtr<CompilerInvocation> Invocation
-    (new CompilerInvocation(ImportingInstance.getInvocation()));
+  auto Invocation =
+      std::make_shared<CompilerInvocation>(ImportingInstance.getInvocation());
 
   PreprocessorOptions &PPOpts = Invocation->getPreprocessorOpts();
   
@@ -1030,7 +1029,7 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
 
   // Remove any macro definitions that are explicitly ignored by the module.
   // They aren't supposed to affect how the module is built anyway.
-  const HeaderSearchOptions &HSOpts = Invocation->getHeaderSearchOpts();
+  HeaderSearchOptions &HSOpts = Invocation->getHeaderSearchOpts();
   PPOpts.Macros.erase(
       std::remove_if(PPOpts.Macros.begin(), PPOpts.Macros.end(),
                      [&HSOpts](const std::pair<std::string, bool> &def) {
@@ -1049,7 +1048,8 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
   PreprocessorOptions &ImportingPPOpts
     = ImportingInstance.getInvocation().getPreprocessorOpts();
   if (!ImportingPPOpts.FailedModules)
-    ImportingPPOpts.FailedModules = new PreprocessorOptions::FailedModulesSet;
+    ImportingPPOpts.FailedModules =
+        std::make_shared<PreprocessorOptions::FailedModulesSet>();
   PPOpts.FailedModules = ImportingPPOpts.FailedModules;
 
   // If there is a module map file, build the module using the module map.
@@ -1060,6 +1060,8 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
   FrontendOpts.DisableFree = false;
   FrontendOpts.GenerateGlobalModuleIndex = false;
   FrontendOpts.BuildingImplicitModule = true;
+  // Force implicitly-built modules to hash the content of the module file.
+  HSOpts.ModulesHashContent = true;
   FrontendOpts.Inputs.clear();
   InputKind IK = getSourceInputKindFromOptions(*Invocation->getLangOpts());
 
@@ -1074,7 +1076,8 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
   // module.
   CompilerInstance Instance(ImportingInstance.getPCHContainerOperations(),
                             /*BuildingModule=*/true);
-  Instance.setInvocation(&*Invocation);
+  auto &Inv = *Invocation;
+  Instance.setInvocation(std::move(Invocation));
 
   Instance.createDiagnostics(new ForwardingDiagnosticConsumer(
                                    ImportingInstance.getDiagnosticClient()),
@@ -1096,7 +1099,7 @@ static bool compileModuleImpl(CompilerInstance &ImportingInstance,
   // between all of the module CompilerInstances. Other than that, we don't
   // want to produce any dependency output from the module build.
   Instance.setModuleDepCollector(ImportingInstance.getModuleDepCollector());
-  Invocation->getDependencyOutputOpts() = DependencyOutputOptions();
+  Inv.getDependencyOutputOpts() = DependencyOutputOptions();
 
   // Get or create the module map that we'll use to build this module.
   std::string InferredModuleMapContent;
@@ -1176,10 +1179,14 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
     llvm::LockFileManager Locked(ModuleFileName);
     switch (Locked) {
     case llvm::LockFileManager::LFS_Error:
-      Diags.Report(ModuleNameLoc, diag::err_module_lock_failure)
+      // PCMCache takes care of correctness and locks are only necessary for
+      // performance. Fallback to building the module in case of any lock
+      // related errors.
+      Diags.Report(ModuleNameLoc, diag::remark_module_lock_failure)
           << Module->Name << Locked.getErrorMessage();
-      return false;
-
+      // Clear out any potential leftover.
+      Locked.unsafeRemoveLockFile();
+      // FALLTHROUGH
     case llvm::LockFileManager::LFS_Owned:
       // We're responsible for building the module ourselves.
       if (!compileModuleImpl(ImportingInstance, ModuleNameLoc, Module,
@@ -1199,11 +1206,14 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
       case llvm::LockFileManager::Res_OwnerDied:
         continue; // try again to get the lock.
       case llvm::LockFileManager::Res_Timeout:
-        Diags.Report(ModuleNameLoc, diag::err_module_lock_timeout)
+        // Since PCMCache takes care of correctness, we try waiting for another
+        // process to complete the build so clang does not do it done twice. If
+        // case of timeout, build it ourselves.
+        Diags.Report(ModuleNameLoc, diag::remark_module_lock_timeout)
             << Module->Name;
         // Clear the lock file so that future invokations can make progress.
         Locked.unsafeRemoveLockFile();
-        return false;
+        continue;
       }
       break;
     }

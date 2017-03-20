@@ -45,7 +45,6 @@ def CplusplusAlpha : Package<"cplusplus">, InPackage<Alpha>, Hidden;
 def CplusplusOptIn : Package<"cplusplus">, InPackage<OptIn>;
 
 def Valist : Package<"valist">;
-def ValistAlpha : Package<"valist">, InPackage<Alpha>, Hidden;
 
 def DeadCode : Package<"deadcode">;
 def DeadCodeAlpha : Package<"deadcode">, InPackage<Alpha>, Hidden;
@@ -278,12 +277,20 @@ def VirtualCallChecker : Checker<"VirtualCall">,
 
 } // end: "optin.cplusplus"
 
+let ParentPackage = CplusplusAlpha in {
+
+def IteratorPastEndChecker : Checker<"IteratorPastEnd">,
+  HelpText<"Check iterators used past end">,
+  DescFile<"IteratorPastEndChecker.cpp">;
+
+} // end: "alpha.cplusplus"
+
 
 //===----------------------------------------------------------------------===//
 // Valist checkers.
 //===----------------------------------------------------------------------===//
 
-let ParentPackage = ValistAlpha in {
+let ParentPackage = Valist in {
 
 def UninitializedChecker : Checker<"Uninitialized">,
   HelpText<"Check for usages of uninitialized (or already released) va_lists.">,
@@ -297,7 +304,7 @@ def CopyToSelfChecker : Checker<"CopyToSelf">,
   HelpText<"Check for va_lists which are copied onto itself.">,
   DescFile<"ValistChecker.cpp">;
 
-} // end : "alpha.valist"
+} // end : "valist"
 
 //===----------------------------------------------------------------------===//
 // Deadcode checkers.

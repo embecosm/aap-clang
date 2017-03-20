@@ -94,8 +94,8 @@ enum MacroUse {
 /// Lexers know only about tokens within a single source file, and don't
 /// know anything about preprocessor-level issues like the \#include stack,
 /// token expansion, etc.
-class Preprocessor : public RefCountedBase<Preprocessor> {
-  IntrusiveRefCntPtr<PreprocessorOptions> PPOpts;
+class Preprocessor {
+  std::shared_ptr<PreprocessorOptions> PPOpts;
   DiagnosticsEngine        *Diags;
   LangOptions       &LangOpts;
   const TargetInfo  *Target;
@@ -650,10 +650,9 @@ class Preprocessor : public RefCountedBase<Preprocessor> {
   void updateOutOfDateIdentifier(IdentifierInfo &II) const;
 
 public:
-  Preprocessor(IntrusiveRefCntPtr<PreprocessorOptions> PPOpts,
-               DiagnosticsEngine &diags, LangOptions &opts,
-               SourceManager &SM, HeaderSearch &Headers,
-               ModuleLoader &TheModuleLoader,
+  Preprocessor(std::shared_ptr<PreprocessorOptions> PPOpts,
+               DiagnosticsEngine &diags, LangOptions &opts, SourceManager &SM,
+               HeaderSearch &Headers, ModuleLoader &TheModuleLoader,
                IdentifierInfoLookup *IILookup = nullptr,
                bool OwnsHeaderSearch = false,
                TranslationUnitKind TUKind = TU_Complete);
@@ -1077,6 +1076,24 @@ public:
 
   /// \brief Disable the last EnableBacktrackAtThisPos call.
   void CommitBacktrackedTokens();
+
+  struct CachedTokensRange {
+    CachedTokensTy::size_type Begin, End;
+  };
+
+private:
+  /// \brief A range of cached tokens that should be erased after lexing
+  /// when backtracking requires the erasure of such cached tokens.
+  Optional<CachedTokensRange> CachedTokenRangeToErase;
+
+public:
+  /// \brief Returns the range of cached tokens that were lexed since
+  /// EnableBacktrackAtThisPos() was previously called.
+  CachedTokensRange LastCachedTokenRange();
+
+  /// \brief Erase the range of cached tokens that were lexed since
+  /// EnableBacktrackAtThisPos() was previously called.
+  void EraseCachedTokens(CachedTokensRange TokenRange);
 
   /// \brief Make Preprocessor re-lex the tokens that were lexed since
   /// EnableBacktrackAtThisPos() was previously called.

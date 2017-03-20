@@ -145,7 +145,7 @@ void CodeGenFunction::EmitStmt(const Stmt *S) {
     EmitCoroutineBody(cast<CoroutineBodyStmt>(*S));
     break;
   case Stmt::CoreturnStmtClass:
-    CGM.ErrorUnsupported(S, "coroutine");
+    EmitCoreturnStmt(cast<CoreturnStmt>(*S));
     break;
   case Stmt::CapturedStmtClass: {
     const CapturedStmt *CS = cast<CapturedStmt>(S);
@@ -329,6 +329,10 @@ void CodeGenFunction::EmitStmt(const Stmt *S) {
   case Stmt::OMPTargetTeamsDistributeParallelForSimdDirectiveClass:
     EmitOMPTargetTeamsDistributeParallelForSimdDirective(
         cast<OMPTargetTeamsDistributeParallelForSimdDirective>(*S));
+    break;
+  case Stmt::OMPTargetTeamsDistributeSimdDirectiveClass:
+    EmitOMPTargetTeamsDistributeSimdDirective(
+        cast<OMPTargetTeamsDistributeSimdDirective>(*S));
     break;
   }
 }
