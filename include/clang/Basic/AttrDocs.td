@@ -244,6 +244,36 @@ An example of how to use ``alloc_size``
   }];
 }
 
+def AllocAlignDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+Use ``__attribute__((alloc_align(<alignment>))`` on a function
+declaration to specify that the return value of the function (which must be a
+pointer type) is at least as aligned as the value of the indicated parameter. The 
+parameter is given by its index in the list of formal parameters; the first
+parameter has index 1 unless the function is a C++ non-static member function,
+in which case the first parameter has index 2 to account for the implicit ``this``
+parameter.
+
+.. code-block:: c++
+
+  // The returned pointer has the alignment specified by the first parameter.
+  void *a(size_t align) __attribute__((alloc_align(1)));
+
+  // The returned pointer has the alignment specified by the second parameter.
+  void *b(void *v, size_t align) __attribute__((alloc_align(2)));
+
+  // The returned pointer has the alignment specified by the second visible
+  // parameter, however it must be adjusted for the implicit 'this' parameter.
+  void *Foo::b(void *v, size_t align) __attribute__((alloc_align(3)));
+
+Note that this attribute merely informs the compiler that a function always
+returns a sufficiently aligned pointer. It does not cause the compiler to 
+emit code to enforce that alignment.  The behavior is undefined if the returned
+poitner is not sufficiently aligned.
+  }];
+}
+
 def EnableIfDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{
@@ -1239,6 +1269,19 @@ The semantics are as follows:
   }];
 }
 
+def MicroMipsDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+Clang supports the GNU style ``__attribute__((micromips))`` and
+``__attribute__((nomicromips))`` attributes on MIPS targets. These attributes
+may be attached to a function definition and instructs the backend to generate
+or not to generate microMIPS code for that function.
+
+These attributes override the `-mmicromips` and `-mno-micromips` options
+on the command line.
+  }];
+}
+
 def AVRInterruptDocs : Documentation {
   let Category = DocCatFunction;
   let Content = [{
@@ -1963,6 +2006,55 @@ manipulating bits of the enumerator when issuing warnings.
   }];
 }
 
+def EnumExtensibilityDocs : Documentation {
+  let Category = DocCatType;
+  let Content = [{
+Attribute ``enum_extensibility`` is used to distinguish between enum definitions
+that are extensible and those that are not. The attribute can take either
+``closed`` or ``open`` as an argument. ``closed`` indicates a variable of the
+enum type takes a value that corresponds to one of the enumerators listed in the
+enum definition or, when the enum is annotated with ``flag_enum``, a value that
+can be constructed using values corresponding to the enumerators. ``open``
+indicates a variable of the enum type can take any values allowed by the
+standard and instructs clang to be more lenient when issuing warnings.
+
+.. code-block:: c
+
+  enum __attribute__((enum_extensibility(closed))) ClosedEnum {
+    A0, A1
+  };
+
+  enum __attribute__((enum_extensibility(open))) OpenEnum {
+    B0, B1
+  };
+
+  enum __attribute__((enum_extensibility(closed),flag_enum)) ClosedFlagEnum {
+    C0 = 1 << 0, C1 = 1 << 1
+  };
+
+  enum __attribute__((enum_extensibility(open),flag_enum)) OpenFlagEnum {
+    D0 = 1 << 0, D1 = 1 << 1
+  };
+
+  void foo1() {
+    enum ClosedEnum ce;
+    enum OpenEnum oe;
+    enum ClosedFlagEnum cfe;
+    enum OpenFlagEnum ofe;
+
+    ce = A1;           // no warnings
+    ce = 100;          // warning issued
+    oe = B1;           // no warnings
+    oe = 100;          // no warnings
+    cfe = C0 | C1;     // no warnings
+    cfe = C0 | C1 | 4; // warning issued
+    ofe = D0 | D1;     // no warnings
+    ofe = D0 | D1 | 4; // no warnings
+  }
+
+  }];
+}
+
 def EmptyBasesDocs : Documentation {
   let Category = DocCatType;
   let Content = [{
@@ -2134,6 +2226,21 @@ used to specify full unrolling or partial unrolling by a specified amount.
 This is a compiler hint and the compiler may ignore this directive. See
 `OpenCL v2.0 <https://www.khronos.org/registry/cl/specs/opencl-2.0.pdf>`_
 s6.11.5 for details.
+  }];
+}
+
+def OpenCLIntelReqdSubGroupSizeDocs : Documentation {
+  let Category = DocCatStmt;
+  let Heading = "__attribute__((intel_reqd_sub_group_size))";
+  let Content = [{
+The optional attribute intel_reqd_sub_group_size can be used to indicate that
+the kernel must be compiled and executed with the specified subgroup size. When
+this attribute is present, get_max_sub_group_size() is guaranteed to return the
+specified integer value. This is important for the correctness of many subgroup
+algorithms, and in some cases may be used by the compiler to generate more optimal
+code. See `cl_intel_required_subgroup_size
+<https://www.khronos.org/registry/OpenCL/extensions/intel/cl_intel_required_subgroup_size.txt>`
+for details.
   }];
 }
 
@@ -2578,6 +2685,40 @@ hardware design, touch the red zone.
   }];
 }
 
+def AnyX86NoCallerSavedRegistersDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+Use this attribute to indicate that the specified function has no
+caller-saved registers. That is, all registers are callee-saved except for
+registers used for passing parameters to the function or returning parameters
+from the function.
+The compiler saves and restores any modified registers that were not used for 
+passing or returning arguments to the function.
+
+The user can call functions specified with the 'no_caller_saved_registers'
+attribute from an interrupt handler without saving and restoring all
+call-clobbered registers.
+
+Note that 'no_caller_saved_registers' attribute is not a calling convention.
+In fact, it only overrides the decision of which registers should be saved by
+the caller, but not how the parameters are passed from the caller to the callee.
+
+For example:
+
+  .. code-block:: c
+
+    __attribute__ ((no_caller_saved_registers, fastcall))
+    void f (int arg1, int arg2) {
+      ...
+    }
+
+  In this case parameters 'arg1' and 'arg2' will be passed in registers.
+  In this case, on 32-bit x86 targets, the function 'f' will use ECX and EDX as
+  register parameters. However, it will not assume any scratch registers and
+  should save and restore any modified registers except for ECX and EDX.
+  }];
+}
+
 def SwiftCallDocs : Documentation {
   let Category = DocCatVariable;
   let Content = [{
@@ -2719,6 +2860,32 @@ value of type ``T``.
 Making indirect results explicit in the signature allows C functions to
 directly construct objects into them without relying on language
 optimizations like C++'s named return value optimization (NRVO).
+  }];
+}
+
+def SuppressDocs : Documentation {
+  let Category = DocCatStmt;
+  let Content = [{
+The ``[[gsl::suppress]]`` attribute suppresses specific
+clang-tidy diagnostics for rules of the `C++ Core Guidelines`_ in a portable
+way. The attribute can be attached to declarations, statements, and at
+namespace scope.
+
+.. code-block:: c++
+
+  [[gsl::suppress("Rh-public")]]
+  void f_() {
+    int *p;
+    [[gsl::suppress("type")]] {
+      p = reinterpret_cast<int*>(7);
+    }
+  }
+  namespace N {
+    [[clang::suppress("type", "bounds")]];
+    ...
+  }
+
+.. _`C++ Core Guidelines`: https://github.com/isocpp/CppCoreGuidelines/blob/master/CppCoreGuidelines.md#inforce-enforcement
   }];
 }
 

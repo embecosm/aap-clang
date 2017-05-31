@@ -31,6 +31,7 @@ add_clang_library(clangDriver
   ToolChains/AMDGPU.cpp
   ToolChains/AVR.cpp
   ToolChains/Bitrig.cpp
+  ToolChains/BareMetal.cpp
   ToolChains/Clang.cpp
   ToolChains/CloudABI.cpp
   ToolChains/CommonArgs.cpp
@@ -59,6 +60,7 @@ add_clang_library(clangDriver
   ToolChains/WebAssembly.cpp
   ToolChains/XCore.cpp
   Types.cpp
+  XRayArgs.cpp
 
   DEPENDS
   ClangDriverOptions

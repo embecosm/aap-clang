@@ -308,7 +308,10 @@ class CoroutineBodyStmt final
     OnFallthrough, ///< Handler for control flow falling off the body.
     Allocate,      ///< Coroutine frame memory allocation.
     Deallocate,    ///< Coroutine frame memory deallocation.
-    ReturnValue,   ///< Return value for thunk function.
+    ReturnValue,   ///< Return value for thunk function: p.get_return_object().
+    ResultDecl,    ///< Declaration holding the result of get_return_object.
+    ReturnStmt,    ///< Return statement for the thunk function.
+    ReturnStmtOnAllocFailure, ///< Return statement if allocation failed.
     FirstParamMove ///< First offset for move construction of parameter copies.
   };
   unsigned NumParams;
@@ -331,7 +334,10 @@ public:
     Stmt *OnFallthrough = nullptr;
     Expr *Allocate = nullptr;
     Expr *Deallocate = nullptr;
-    Stmt *ReturnValue = nullptr;
+    Expr *ReturnValue = nullptr;
+    Stmt *ResultDecl = nullptr;
+    Stmt *ReturnStmt = nullptr;
+    Stmt *ReturnStmtOnAllocFailure = nullptr;
     ArrayRef<Stmt *> ParamMoves;
   };
 
@@ -341,6 +347,10 @@ private:
 
 public:
   static CoroutineBodyStmt *Create(const ASTContext &C, CtorArgs const &Args);
+
+  bool hasDependentPromiseType() const {
+    return getPromiseDecl()->getType()->isDependentType();
+  }
 
   /// \brief Retrieve the body of the coroutine as written. This will be either
   /// a CompoundStmt or a TryStmt.
@@ -375,9 +385,13 @@ public:
   Expr *getDeallocate() const {
     return cast_or_null<Expr>(getStoredStmts()[SubStmt::Deallocate]);
   }
-
   Expr *getReturnValueInit() const {
-    return cast_or_null<Expr>(getStoredStmts()[SubStmt::ReturnValue]);
+    return cast<Expr>(getStoredStmts()[SubStmt::ReturnValue]);
+  }
+  Stmt *getResultDecl() const { return getStoredStmts()[SubStmt::ResultDecl]; }
+  Stmt *getReturnStmt() const { return getStoredStmts()[SubStmt::ReturnStmt]; }
+  Stmt *getReturnStmtOnAllocFailure() const {
+    return getStoredStmts()[SubStmt::ReturnStmtOnAllocFailure];
   }
   ArrayRef<Stmt const *> getParamMoves() const {
     return {getStoredStmts() + SubStmt::FirstParamMove, NumParams};

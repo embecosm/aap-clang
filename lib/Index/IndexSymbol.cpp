@@ -61,6 +61,8 @@ bool index::isFunctionLocalSymbol(const Decl *D) {
   if (isa<ObjCTypeParamDecl>(D))
     return true;
 
+  if (isa<UsingDirectiveDecl>(D))
+    return false;
   if (!D->getParentFunctionOrMethod())
     return false;
 
@@ -318,14 +320,20 @@ SymbolInfo index::getSymbolInfo(const Decl *D) {
   if (Info.Properties & (unsigned)SymbolProperty::Generic)
     Info.Lang = SymbolLanguage::CXX;
 
+  if (auto *attr = D->getExternalSourceSymbolAttr()) {
+    if (attr->getLanguage() == "Swift")
+      Info.Lang = SymbolLanguage::Swift;
+  }
+
   return Info;
 }
 
-void index::applyForEachSymbolRole(SymbolRoleSet Roles,
-                                   llvm::function_ref<void(SymbolRole)> Fn) {
+bool index::applyForEachSymbolRoleInterruptible(SymbolRoleSet Roles,
+                                   llvm::function_ref<bool(SymbolRole)> Fn) {
 #define APPLY_FOR_ROLE(Role) \
   if (Roles & (unsigned)SymbolRole::Role) \
-    Fn(SymbolRole::Role)
+    if (!Fn(SymbolRole::Role)) \
+      return false;
 
   APPLY_FOR_ROLE(Declaration);
   APPLY_FOR_ROLE(Definition);
@@ -345,8 +353,19 @@ void index::applyForEachSymbolRole(SymbolRoleSet Roles,
   APPLY_FOR_ROLE(RelationAccessorOf);
   APPLY_FOR_ROLE(RelationContainedBy);
   APPLY_FOR_ROLE(RelationIBTypeOf);
+  APPLY_FOR_ROLE(RelationSpecializationOf);
 
 #undef APPLY_FOR_ROLE
+
+  return true;
+}
+
+void index::applyForEachSymbolRole(SymbolRoleSet Roles,
+                                   llvm::function_ref<void(SymbolRole)> Fn) {
+  applyForEachSymbolRoleInterruptible(Roles, [&](SymbolRole r) -> bool {
+    Fn(r);
+    return true;
+  });
 }
 
 void index::printSymbolRoles(SymbolRoleSet Roles, raw_ostream &OS) {
@@ -375,6 +394,7 @@ void index::printSymbolRoles(SymbolRoleSet Roles, raw_ostream &OS) {
     case SymbolRole::RelationAccessorOf: OS << "RelAcc"; break;
     case SymbolRole::RelationContainedBy: OS << "RelCont"; break;
     case SymbolRole::RelationIBTypeOf: OS << "RelIBType"; break;
+    case SymbolRole::RelationSpecializationOf: OS << "RelSpecialization"; break;
     }
   });
 }
@@ -445,6 +465,7 @@ StringRef index::getSymbolLanguageString(SymbolLanguage K) {
   case SymbolLanguage::C: return "C";
   case SymbolLanguage::ObjC: return "ObjC";
   case SymbolLanguage::CXX: return "C++";
+  case SymbolLanguage::Swift: return "Swift";
   }
   llvm_unreachable("invalid symbol language kind");
 }

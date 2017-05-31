@@ -301,9 +301,14 @@ RValue CodeGenFunction::EmitCXXMemberOrOperatorMemberCallExpr(
     CallLoc = CE->getExprLoc();
 
   SanitizerSet SkippedChecks;
-  if (const auto *CMCE = dyn_cast<CXXMemberCallExpr>(CE))
-    if (IsDeclRefOrWrappedCXXThis(CMCE->getImplicitObjectArgument()))
+  if (const auto *CMCE = dyn_cast<CXXMemberCallExpr>(CE)) {
+    auto *IOA = CMCE->getImplicitObjectArgument();
+    bool IsImplicitObjectCXXThis = IsWrappedCXXThis(IOA);
+    if (IsImplicitObjectCXXThis)
+      SkippedChecks.set(SanitizerKind::Alignment, true);
+    if (IsImplicitObjectCXXThis || isa<DeclRefExpr>(IOA))
       SkippedChecks.set(SanitizerKind::Null, true);
+  }
   EmitTypeCheck(
       isa<CXXConstructorDecl>(CalleeDecl) ? CodeGenFunction::TCK_ConstructorCall
                                           : CodeGenFunction::TCK_MemberCall,
@@ -1275,10 +1280,10 @@ static RValue EmitNewDeleteCall(CodeGenFunction &CGF,
       Fn && Fn->hasFnAttribute(llvm::Attribute::NoBuiltin)) {
     // FIXME: Add addAttribute to CallSite.
     if (llvm::CallInst *CI = dyn_cast<llvm::CallInst>(CallOrInvoke))
-      CI->addAttribute(llvm::AttributeSet::FunctionIndex,
+      CI->addAttribute(llvm::AttributeList::FunctionIndex,
                        llvm::Attribute::Builtin);
     else if (llvm::InvokeInst *II = dyn_cast<llvm::InvokeInst>(CallOrInvoke))
-      II->addAttribute(llvm::AttributeSet::FunctionIndex,
+      II->addAttribute(llvm::AttributeList::FunctionIndex,
                        llvm::Attribute::Builtin);
     else
       llvm_unreachable("unexpected kind of call instruction");
@@ -1526,13 +1531,13 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
     assert(E->getNumPlacementArgs() == 1);
     const Expr *arg = *E->placement_arguments().begin();
 
-    AlignmentSource alignSource;
-    allocation = EmitPointerWithAlignment(arg, &alignSource);
+    LValueBaseInfo BaseInfo;
+    allocation = EmitPointerWithAlignment(arg, &BaseInfo);
 
     // The pointer expression will, in many cases, be an opaque void*.
     // In these cases, discard the computed alignment and use the
     // formal alignment of the allocated type.
-    if (alignSource != AlignmentSource::Decl)
+    if (BaseInfo.getAlignmentSource() != AlignmentSource::Decl)
       allocation = Address(allocation.getPointer(), allocAlign);
 
     // Set up allocatorArgs for the call to operator delete if it's not
@@ -1653,8 +1658,9 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
 
   // Passing pointer through invariant.group.barrier to avoid propagation of
   // vptrs information which may be included in previous type.
+  // To not break LTO with different optimizations levels, we do it regardless
+  // of optimization level.
   if (CGM.getCodeGenOpts().StrictVTablePointers &&
-      CGM.getCodeGenOpts().OptimizationLevel > 0 &&
       allocator->isReservedGlobalPlacementOperator())
     result = Address(Builder.CreateInvariantGroupBarrier(result.getPointer()),
                      result.getAlignment());

@@ -35,6 +35,7 @@
 #include "clang/Basic/FileSystemOptions.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/LangOptions.h"
+#include "clang/Basic/MemoryBufferCache.h"
 #include "clang/Basic/Module.h"
 #include "clang/Basic/ObjCRuntime.h"
 #include "clang/Basic/SourceManager.h"
@@ -254,6 +255,7 @@ void ASTTypeWriter::VisitFunctionType(const FunctionType *T) {
   // FIXME: need to stabilize encoding of calling convention...
   Record.push_back(C.getCC());
   Record.push_back(C.getProducesResult());
+  Record.push_back(C.getNoCallerSavedRegs());
 
   if (C.getHasRegParm() || C.getRegParm() || C.getProducesResult())
     AbbrevToUse = 0;
@@ -425,8 +427,10 @@ ASTTypeWriter::VisitDependentSizedArrayType(const DependentSizedArrayType *T) {
 void
 ASTTypeWriter::VisitDependentSizedExtVectorType(
                                         const DependentSizedExtVectorType *T) {
-  // FIXME: Serialize this type (C++ only)
-  llvm_unreachable("Cannot serialize dependent sized extended vector types");
+  Record.AddTypeRef(T->getElementType());
+  Record.AddStmt(T->getSizeExpr());
+  Record.AddSourceLocation(T->getAttributeLoc());
+  Code = TYPE_DEPENDENT_SIZED_EXT_VECTOR;
 }
 
 void
@@ -836,6 +840,7 @@ void ASTWriter::WriteTypeAbbrevs() {
   Abv->Add(BitCodeAbbrevOp(0));                         // RegParm
   Abv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 4)); // CC
   Abv->Add(BitCodeAbbrevOp(0));                         // ProducesResult
+  Abv->Add(BitCodeAbbrevOp(0));                         // NoCallerSavedRegs
   // FunctionProtoType
   Abv->Add(BitCodeAbbrevOp(0));                         // IsVariadic
   Abv->Add(BitCodeAbbrevOp(0));                         // HasTrailingReturn
@@ -1088,6 +1093,7 @@ void ASTWriter::WriteBlockInfoBlock() {
   RECORD(UNUSED_LOCAL_TYPEDEF_NAME_CANDIDATES);
   RECORD(DELETE_EXPRS_TO_ANALYZE);
   RECORD(CUDA_PRAGMA_FORCE_HOST_DEVICE_DEPTH);
+  RECORD(PP_CONDITIONAL_STACK);
 
   // SourceManager Block.
   BLOCK(SOURCE_MANAGER_BLOCK);
@@ -2297,6 +2303,18 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
     Stream.EmitRecord(PP_COUNTER_VALUE, Record);
   }
 
+  if (PP.isRecordingPreamble() && PP.hasRecordedPreamble()) {
+    assert(!IsModule);
+    for (const auto &Cond : PP.getPreambleConditionalStack()) {
+      AddSourceLocation(Cond.IfLoc, Record);
+      Record.push_back(Cond.WasSkipping);
+      Record.push_back(Cond.FoundNonSkip);
+      Record.push_back(Cond.FoundElse);
+    }
+    Stream.EmitRecord(PP_CONDITIONAL_STACK, Record);
+    Record.clear();
+  }
+
   // Enter the preprocessor block.
   Stream.EnterSubblock(PREPROCESSOR_BLOCK_ID, 3);
 
@@ -2408,7 +2426,6 @@ void ASTWriter::WritePreprocessor(const Preprocessor &PP, bool IsModule) {
     }
 
     AddIdentifierRef(Name, Record);
-    Record.push_back(inferSubmoduleIDFromLocation(MI->getDefinitionLoc()));
     AddSourceLocation(MI->getDefinitionLoc(), Record);
     AddSourceLocation(MI->getDefinitionEndLoc(), Record);
     Record.push_back(MI->isUsed());
@@ -2624,7 +2641,6 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // InferExplicit...
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // InferExportWild...
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // ConfigMacrosExh...
-  Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed, 1)); // WithCodegen
   Abbrev->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Blob)); // Name
   unsigned DefinitionAbbrev = Stream.EmitAbbrev(std::move(Abbrev));
 
@@ -2692,9 +2708,10 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
   unsigned ConflictAbbrev = Stream.EmitAbbrev(std::move(Abbrev));
 
   // Write the submodule metadata block.
-  RecordData::value_type Record[] = {getNumberOfModules(WritingModule),
-                                     FirstSubmoduleID -
-                                         NUM_PREDEF_SUBMODULE_IDS};
+  RecordData::value_type Record[] = {
+      getNumberOfModules(WritingModule),
+      FirstSubmoduleID - NUM_PREDEF_SUBMODULE_IDS,
+      (unsigned)WritingModule->Kind};
   Stream.EmitRecord(SUBMODULE_METADATA, Record);
   
   // Write all of the submodules.
@@ -2723,8 +2740,7 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
                                          Mod->InferSubmodules,
                                          Mod->InferExplicitSubmodules,
                                          Mod->InferExportWildcard,
-                                         Mod->ConfigMacrosExhaustive,
-                                         Context->getLangOpts().ModularCodegen && WritingModule};
+                                         Mod->ConfigMacrosExhaustive};
       Stream.EmitRecordWithBlob(DefinitionAbbrev, Record, Mod->Name);
     }
 
@@ -2838,25 +2854,6 @@ void ASTWriter::WriteSubmodules(Module *WritingModule) {
          "non-imported submodule?");
 }
 
-serialization::SubmoduleID 
-ASTWriter::inferSubmoduleIDFromLocation(SourceLocation Loc) {
-  if (Loc.isInvalid() || !WritingModule)
-    return 0; // No submodule
-    
-  // Find the module that owns this location.
-  ModuleMap &ModMap = PP->getHeaderSearchInfo().getModuleMap();
-  Module *OwningMod 
-    = ModMap.inferModuleFromLocation(FullSourceLoc(Loc,PP->getSourceManager()));
-  if (!OwningMod)
-    return 0;
-  
-  // Check whether this submodule is part of our own module.
-  if (WritingModule != OwningMod && !OwningMod->isSubModuleOf(WritingModule))
-    return 0;
-  
-  return getSubmoduleID(OwningMod);
-}
-
 void ASTWriter::WritePragmaDiagnosticMappings(const DiagnosticsEngine &Diag,
                                               bool isModule) {
   llvm::SmallDenseMap<const DiagnosticsEngine::DiagState *, unsigned, 64>
@@ -2864,8 +2861,27 @@ void ASTWriter::WritePragmaDiagnosticMappings(const DiagnosticsEngine &Diag,
   unsigned CurrID = 0;
   RecordData Record;
 
+  auto EncodeDiagStateFlags =
+      [](const DiagnosticsEngine::DiagState *DS) -> unsigned {
+    unsigned Result = (unsigned)DS->ExtBehavior;
+    for (unsigned Val :
+         {(unsigned)DS->IgnoreAllWarnings, (unsigned)DS->EnableAllWarnings,
+          (unsigned)DS->WarningsAsErrors, (unsigned)DS->ErrorsAsFatal,
+          (unsigned)DS->SuppressSystemWarnings})
+      Result = (Result << 1) | Val;
+    return Result;
+  };
+
+  unsigned Flags = EncodeDiagStateFlags(Diag.DiagStatesByLoc.FirstDiagState);
+  Record.push_back(Flags);
+
   auto AddDiagState = [&](const DiagnosticsEngine::DiagState *State,
                           bool IncludeNonPragmaStates) {
+    // Ensure that the diagnostic state wasn't modified since it was created.
+    // We will not correctly round-trip this information otherwise.
+    assert(Flags == EncodeDiagStateFlags(State) &&
+           "diag state flags vary in single AST file");
+
     unsigned &DiagStateID = DiagStateIDMap[State];
     Record.push_back(DiagStateID);
   
@@ -2878,7 +2894,7 @@ void ASTWriter::WritePragmaDiagnosticMappings(const DiagnosticsEngine &Diag,
       for (const auto &I : *State) {
         if (I.second.isPragma() || IncludeNonPragmaStates) {
           Record.push_back(I.first);
-          Record.push_back((unsigned)I.second.getSeverity());
+          Record.push_back(I.second.serialize());
         }
       }
       // Update the placeholder.
@@ -2887,13 +2903,18 @@ void ASTWriter::WritePragmaDiagnosticMappings(const DiagnosticsEngine &Diag,
   };
 
   AddDiagState(Diag.DiagStatesByLoc.FirstDiagState, isModule);
-  AddSourceLocation(Diag.DiagStatesByLoc.CurDiagStateLoc, Record);
-  AddDiagState(Diag.DiagStatesByLoc.CurDiagState, false);
 
+  // Reserve a spot for the number of locations with state transitions.
+  auto NumLocationsIdx = Record.size();
+  Record.emplace_back();
+
+  // Emit the state transitions.
+  unsigned NumLocations = 0;
   for (auto &FileIDAndFile : Diag.DiagStatesByLoc.Files) {
     if (!FileIDAndFile.first.isValid() ||
         !FileIDAndFile.second.HasLocalTransitions)
       continue;
+    ++NumLocations;
     AddSourceLocation(Diag.SourceMgr->getLocForStartOfFile(FileIDAndFile.first),
                       Record);
     Record.push_back(FileIDAndFile.second.StateTransitions.size());
@@ -2903,8 +2924,19 @@ void ASTWriter::WritePragmaDiagnosticMappings(const DiagnosticsEngine &Diag,
     }
   }
 
-  if (!Record.empty())
-    Stream.EmitRecord(DIAG_PRAGMA_MAPPINGS, Record);
+  // Backpatch the number of locations.
+  Record[NumLocationsIdx] = NumLocations;
+
+  // Emit CurDiagStateLoc.  Do it last in order to match source order.
+  //
+  // This also protects against a hypothetical corner case with simulating
+  // -Werror settings for implicit modules in the ASTReader, where reading
+  // CurDiagState out of context could change whether warning pragmas are
+  // treated as errors.
+  AddSourceLocation(Diag.DiagStatesByLoc.CurDiagStateLoc, Record);
+  AddDiagState(Diag.DiagStatesByLoc.CurDiagState, false);
+
+  Stream.EmitRecord(DIAG_PRAGMA_MAPPINGS, Record);
 }
 
 //===----------------------------------------------------------------------===//
@@ -4012,7 +4044,7 @@ void ASTWriter::WriteDeclContextVisibleUpdate(const DeclContext *DC) {
 
 /// \brief Write an FP_PRAGMA_OPTIONS block for the given FPOptions.
 void ASTWriter::WriteFPPragmaOptions(const FPOptions &Opts) {
-  RecordData::value_type Record[] = {Opts.fp_contract};
+  RecordData::value_type Record[] = {Opts.getInt()};
   Stream.EmitRecord(FP_PRAGMA_OPTIONS, Record);
 }
 
@@ -4167,6 +4199,25 @@ void ASTWriter::WriteMSPointersToMembersPragmaOptions(Sema &SemaRef) {
   Stream.EmitRecord(POINTERS_TO_MEMBERS_PRAGMA_OPTIONS, Record);
 }
 
+/// \brief Write the state of 'pragma pack' at the end of the module.
+void ASTWriter::WritePackPragmaOptions(Sema &SemaRef) {
+  // Don't serialize pragma pack state for modules, since it should only take
+  // effect on a per-submodule basis.
+  if (WritingModule)
+    return;
+
+  RecordData Record;
+  Record.push_back(SemaRef.PackStack.CurrentValue);
+  AddSourceLocation(SemaRef.PackStack.CurrentPragmaLocation, Record);
+  Record.push_back(SemaRef.PackStack.Stack.size());
+  for (const auto &StackEntry : SemaRef.PackStack.Stack) {
+    Record.push_back(StackEntry.Value);
+    AddSourceLocation(StackEntry.PragmaLocation, Record);
+    AddString(StackEntry.StackSlotLabel, Record);
+  }
+  Stream.EmitRecord(PACK_PRAGMA_OPTIONS, Record);
+}
+
 void ASTWriter::WriteModuleFileExtension(Sema &SemaRef,
                                          ModuleFileExtensionWriter &Writer) {
   // Enter the extension block.
@@ -4304,10 +4355,11 @@ void ASTWriter::SetSelectorOffset(Selector Sel, uint32_t Offset) {
 }
 
 ASTWriter::ASTWriter(llvm::BitstreamWriter &Stream,
-                     SmallVectorImpl<char> &Buffer,
+                     SmallVectorImpl<char> &Buffer, MemoryBufferCache &PCMCache,
                      ArrayRef<std::shared_ptr<ModuleFileExtension>> Extensions,
                      bool IncludeTimestamps)
-    : Stream(Stream), Buffer(Buffer), IncludeTimestamps(IncludeTimestamps) {
+    : Stream(Stream), Buffer(Buffer), PCMCache(PCMCache),
+      IncludeTimestamps(IncludeTimestamps) {
   for (const auto &Ext : Extensions) {
     if (auto Writer = Ext->createExtensionWriter(*this))
       ModuleFileExtensionWriters.push_back(std::move(Writer));
@@ -4354,6 +4406,12 @@ ASTFileSignature ASTWriter::WriteAST(Sema &SemaRef,
   this->BaseDirectory.clear();
 
   WritingAST = false;
+  if (SemaRef.Context.getLangOpts().ImplicitModules && WritingModule) {
+    // Construct MemoryBuffer and update buffer manager.
+    PCMCache.addBuffer(OutputFile,
+                       llvm::MemoryBuffer::getMemBufferCopy(
+                           StringRef(Buffer.begin(), Buffer.size())));
+  }
   return Signature;
 }
 
@@ -4744,7 +4802,7 @@ ASTFileSignature ASTWriter::WriteASTCore(Sema &SemaRef, StringRef isysroot,
   if (!EagerlyDeserializedDecls.empty())
     Stream.EmitRecord(EAGERLY_DESERIALIZED_DECLS, EagerlyDeserializedDecls);
 
-  if (Context.getLangOpts().ModularCodegen)
+  if (!ModularCodegenDecls.empty())
     Stream.EmitRecord(MODULAR_CODEGEN_DECLS, ModularCodegenDecls);
 
   // Write the record containing tentative definitions.
@@ -4850,6 +4908,7 @@ ASTFileSignature ASTWriter::WriteASTCore(Sema &SemaRef, StringRef isysroot,
     WriteMSStructPragmaOptions(SemaRef);
     WriteMSPointersToMembersPragmaOptions(SemaRef);
   }
+  WritePackPragmaOptions(SemaRef);
 
   // Some simple statistics
   RecordData::value_type Record[] = {
@@ -5746,7 +5805,15 @@ void ASTRecordWriter::AddCXXDefinitionData(const CXXRecordDecl *D) {
   Record->push_back(Data.ImplicitCopyAssignmentHasConstParam);
   Record->push_back(Data.HasDeclaredCopyConstructorWithConstParam);
   Record->push_back(Data.HasDeclaredCopyAssignmentWithConstParam);
-  Record->push_back(Data.ODRHash);
+
+  // getODRHash will compute the ODRHash if it has not been previously computed.
+  Record->push_back(D->getODRHash());
+  bool ModulesDebugInfo = Writer->Context->getLangOpts().ModulesDebugInfo &&
+                          Writer->WritingModule && !D->isDependentType();
+  Record->push_back(ModulesDebugInfo);
+  if (ModulesDebugInfo)
+    Writer->ModularCodegenDecls.push_back(Writer->GetDeclRef(D));
+
   // IsLambda bit is already saved.
 
   Record->push_back(Data.NumBases);
