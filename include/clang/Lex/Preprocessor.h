@@ -1048,6 +1048,10 @@ public:
   /// which implicitly adds the builtin defines etc.
   void EnterMainSourceFile();
 
+  /// \brief After parser warm-up, initialize the conditional stack from
+  /// the preamble.
+  void replayPreambleConditionalStack();
+
   /// \brief Inform the preprocessor callbacks that processing is complete.
   void EndSourceFile();
 
@@ -1733,11 +1737,6 @@ public:
   /// \brief Return true if we're in the top-level file, not in a \#include.
   bool isInPrimaryFile() const;
 
-  /// \brief Return true if we're in the main file (specifically, if we are 0
-  /// (zero) levels deep \#include. This is used by the lexer to determine if
-  /// it needs to generate errors about unterminated \#if directives.
-  bool isInMainFile() const;
-
   /// \brief Handle cases where the \#include name is expanded
   /// from a macro as multiple tokens, which need to be glued together. 
   ///
@@ -1835,11 +1834,20 @@ private:
   /// \brief A fast PTH version of SkipExcludedConditionalBlock.
   void PTHSkipExcludedConditionalBlock();
 
+  /// Information about the result for evaluating an expression for a
+  /// preprocessor directive.
+  struct DirectiveEvalResult {
+    /// Whether the expression was evaluated as true or not.
+    bool Conditional;
+    /// True if the expression contained identifiers that were undefined.
+    bool IncludedUndefinedIds;
+  };
+
   /// \brief Evaluate an integer constant expression that may occur after a
-  /// \#if or \#elif directive and return it as a bool.
+  /// \#if or \#elif directive and return a \p DirectiveEvalResult object.
   ///
   /// If the expression is equivalent to "!defined(X)" return X in IfNDefMacro.
-  bool EvaluateDirectiveExpression(IdentifierInfo *&IfNDefMacro);
+  DirectiveEvalResult EvaluateDirectiveExpression(IdentifierInfo *&IfNDefMacro);
 
   /// \brief Install the standard preprocessor pragmas:
   /// \#pragma GCC poison/system_header/dependency and \#pragma once.
@@ -1954,6 +1962,13 @@ private:
   void HandleMicrosoftImportDirective(Token &Tok);
 
 public:
+  /// Check that the given module is available, producing a diagnostic if not.
+  /// \return \c true if the check failed (because the module is not available).
+  ///         \c false if the module appears to be usable.
+  static bool checkModuleIsAvailable(const LangOptions &LangOpts,
+                                     const TargetInfo &TargetInfo,
+                                     DiagnosticsEngine &Diags, Module *M);
+
   // Module inclusion testing.
   /// \brief Find the module that owns the source or header file that
   /// \p Loc points to. If the location is in a file that was included
@@ -2021,6 +2036,7 @@ public:
   void HandlePragmaPushMacro(Token &Tok);
   void HandlePragmaPopMacro(Token &Tok);
   void HandlePragmaIncludeAlias(Token &Tok);
+  void HandlePragmaModuleBuild(Token &Tok);
   IdentifierInfo *ParsePragmaPushOrPopMacro(Token &Tok);
 
   // Return true and store the first token only if any CommentHandler

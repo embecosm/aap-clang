@@ -53,7 +53,8 @@ void AAPToolChain::AddClangSystemIncludeArgs(
 
 void AAPToolChain::addClangTargetOptions(
     const llvm::opt::ArgList &DriverArgs,
-    llvm::opt::ArgStringList &CC1Args) const {
+    llvm::opt::ArgStringList &CC1Args,
+    Action::OffloadKind) const {
   CC1Args.push_back("-nostdsysteminc");
   CC1Args.push_back("-dwarf-column-info");
 }
