@@ -571,8 +571,6 @@ protected:
 public:
   OpenBSDTargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
       : OSTargetInfo<Target>(Triple, Opts) {
-    this->TLSSupported = false;
-
       switch (Triple.getArch()) {
         case llvm::Triple::x86:
         case llvm::Triple::x86_64:
@@ -965,8 +963,8 @@ public:
   //  401, 403, 405, 405fp, 440fp, 464, 464fp, 476, 476fp, 505, 740, 801,
   //  821, 823, 8540, 8548, e300c2, e300c3, e500mc64, e6500, 860, cell,
   //  titan, rs64.
-  bool setCPU(const std::string &Name) override {
-    bool CPUKnown = llvm::StringSwitch<bool>(Name)
+  bool isValidCPUName(StringRef Name) const override {
+    return llvm::StringSwitch<bool>(Name)
       .Case("generic", true)
       .Case("440", true)
       .Case("450", true)
@@ -1016,10 +1014,12 @@ public:
       .Case("powerpc64le", true)
       .Case("ppc64le", true)
       .Default(false);
+  }
 
+  bool setCPU(const std::string &Name) override {
+    bool CPUKnown = isValidCPUName(Name);
     if (CPUKnown)
       CPU = Name;
-
     return CPUKnown;
   }
 
@@ -1833,9 +1833,9 @@ public:
     GPU = CudaArch::SM_20;
 
     if (TargetPointerWidth == 32)
-      resetDataLayout("e-p:32:32-i64:64-v16:16-v32:32-n16:32:64");
+      resetDataLayout("e-p:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64");
     else
-      resetDataLayout("e-i64:64-v16:16-v32:32-n16:32:64");
+      resetDataLayout("e-i64:64-i128:128-v16:16-v32:32-n16:32:64");
 
     // If possible, get a TargetInfo for our host triple, so we can match its
     // types.
@@ -2007,6 +2007,9 @@ public:
   BuiltinVaListKind getBuiltinVaListKind() const override {
     // FIXME: implement
     return TargetInfo::CharPtrBuiltinVaList;
+  }
+  bool isValidCPUName(StringRef Name) const override {
+    return StringToCudaArch(Name) != CudaArch::UNKNOWN;
   }
   bool setCPU(const std::string &Name) override {
     GPU = StringToCudaArch(Name);
@@ -2367,6 +2370,13 @@ public:
       .Case("gfx900",    GK_GFX9)
       .Case("gfx901",    GK_GFX9)
       .Default(GK_NONE);
+  }
+
+  bool isValidCPUName(StringRef Name) const override {
+    if (getTriple().getArch() == llvm::Triple::amdgcn)
+      return GK_NONE !=  parseAMDGCNName(Name);
+    else
+      return GK_NONE !=  parseR600Name(Name);
   }
 
   bool setCPU(const std::string &Name) override {
@@ -2875,6 +2885,87 @@ class X86TargetInfo : public TargetInfo {
     //@}
   } CPU = CK_Generic;
 
+  bool checkCPUKind(CPUKind Kind) const {
+    // Perform any per-CPU checks necessary to determine if this CPU is
+    // acceptable.
+    // FIXME: This results in terrible diagnostics. Clang just says the CPU is
+    // invalid without explaining *why*.
+    switch (Kind) {
+    case CK_Generic:
+      // No processor selected!
+      return false;
+
+    case CK_i386:
+    case CK_i486:
+    case CK_WinChipC6:
+    case CK_WinChip2:
+    case CK_C3:
+    case CK_i586:
+    case CK_Pentium:
+    case CK_PentiumMMX:
+    case CK_i686:
+    case CK_PentiumPro:
+    case CK_Pentium2:
+    case CK_Pentium3:
+    case CK_Pentium3M:
+    case CK_PentiumM:
+    case CK_Yonah:
+    case CK_C3_2:
+    case CK_Pentium4:
+    case CK_Pentium4M:
+    case CK_Lakemont:
+    case CK_Prescott:
+    case CK_K6:
+    case CK_K6_2:
+    case CK_K6_3:
+    case CK_Athlon:
+    case CK_AthlonThunderbird:
+    case CK_Athlon4:
+    case CK_AthlonXP:
+    case CK_AthlonMP:
+    case CK_Geode:
+      // Only accept certain architectures when compiling in 32-bit mode.
+      if (getTriple().getArch() != llvm::Triple::x86)
+        return false;
+
+    LLVM_FALLTHROUGH;
+    case CK_Nocona:
+    case CK_Core2:
+    case CK_Penryn:
+    case CK_Bonnell:
+    case CK_Silvermont:
+    case CK_Goldmont:
+    case CK_Nehalem:
+    case CK_Westmere:
+    case CK_SandyBridge:
+    case CK_IvyBridge:
+    case CK_Haswell:
+    case CK_Broadwell:
+    case CK_SkylakeClient:
+    case CK_SkylakeServer:
+    case CK_Cannonlake:
+    case CK_KNL:
+    case CK_Athlon64:
+    case CK_Athlon64SSE3:
+    case CK_AthlonFX:
+    case CK_K8:
+    case CK_K8SSE3:
+    case CK_Opteron:
+    case CK_OpteronSSE3:
+    case CK_AMDFAM10:
+    case CK_BTVER1:
+    case CK_BTVER2:
+    case CK_BDVER1:
+    case CK_BDVER2:
+    case CK_BDVER3:
+    case CK_BDVER4:
+    case CK_ZNVER1:
+    case CK_x86_64:
+      return true;
+    }
+    llvm_unreachable("Unhandled CPU kind");
+  }
+
   CPUKind getCPUKind(StringRef CPU) const {
     return llvm::StringSwitch<CPUKind>(CPU)
         .Case("i386", CK_i386)
@@ -3055,6 +3146,7 @@ public:
   initFeatureMap(llvm::StringMap<bool> &Features, DiagnosticsEngine &Diags,
                  StringRef CPU,
                  const std::vector<std::string> &FeaturesVec) const override;
+  bool isValidFeatureName(StringRef Name) const override;
   bool hasFeature(StringRef Feature) const override;
   bool handleTargetFeatures(std::vector<std::string> &Features,
                             DiagnosticsEngine &Diags) override;
@@ -3068,87 +3160,13 @@ public:
       return "no-mmx";
     return "";
   }
+
+  bool isValidCPUName(StringRef Name) const override {
+    return checkCPUKind(getCPUKind(Name));
+  }
+
   bool setCPU(const std::string &Name) override {
-    CPU = getCPUKind(Name);
-
-    // Perform any per-CPU checks necessary to determine if this CPU is
-    // acceptable.
-    // FIXME: This results in terrible diagnostics. Clang just says the CPU is
-    // invalid without explaining *why*.
-    switch (CPU) {
-    case CK_Generic:
-      // No processor selected!
-      return false;
-
-    case CK_i386:
-    case CK_i486:
-    case CK_WinChipC6:
-    case CK_WinChip2:
-    case CK_C3:
-    case CK_i586:
-    case CK_Pentium:
-    case CK_PentiumMMX:
-    case CK_i686:
-    case CK_PentiumPro:
-    case CK_Pentium2:
-    case CK_Pentium3:
-    case CK_Pentium3M:
-    case CK_PentiumM:
-    case CK_Yonah:
-    case CK_C3_2:
-    case CK_Pentium4:
-    case CK_Pentium4M:
-    case CK_Lakemont:
-    case CK_Prescott:
-    case CK_K6:
-    case CK_K6_2:
-    case CK_K6_3:
-    case CK_Athlon:
-    case CK_AthlonThunderbird:
-    case CK_Athlon4:
-    case CK_AthlonXP:
-    case CK_AthlonMP:
-    case CK_Geode:
-      // Only accept certain architectures when compiling in 32-bit mode.
-      if (getTriple().getArch() != llvm::Triple::x86)
-        return false;
-
-      // Fallthrough
-    case CK_Nocona:
-    case CK_Core2:
-    case CK_Penryn:
-    case CK_Bonnell:
-    case CK_Silvermont:
-    case CK_Goldmont:
-    case CK_Nehalem:
-    case CK_Westmere:
-    case CK_SandyBridge:
-    case CK_IvyBridge:
-    case CK_Haswell:
-    case CK_Broadwell:
-    case CK_SkylakeClient:
-    case CK_SkylakeServer:
-    case CK_Cannonlake:
-    case CK_KNL:
-    case CK_Athlon64:
-    case CK_Athlon64SSE3:
-    case CK_AthlonFX:
-    case CK_K8:
-    case CK_K8SSE3:
-    case CK_Opteron:
-    case CK_OpteronSSE3:
-    case CK_AMDFAM10:
-    case CK_BTVER1:
-    case CK_BTVER2:
-    case CK_BDVER1:
-    case CK_BDVER2:
-    case CK_BDVER3:
-    case CK_BDVER4:
-    case CK_ZNVER1:
-    case CK_x86_64:
-      return true;
-    }
-    llvm_unreachable("Unhandled CPU kind");
+    return checkCPUKind(CPU = getCPUKind(Name));
   }
 
   bool setFPMath(StringRef Name) override;
@@ -3401,6 +3419,7 @@ bool X86TargetInfo::initFeatureMap(
     setFeatureEnabledImpl(Features, "bmi", true);
     setFeatureEnabledImpl(Features, "f16c", true);
     setFeatureEnabledImpl(Features, "xsaveopt", true);
+    setFeatureEnabledImpl(Features, "movbe", true);
     LLVM_FALLTHROUGH;
   case CK_BTVER1:
     setFeatureEnabledImpl(Features, "ssse3", true);
@@ -4240,6 +4259,68 @@ void X86TargetInfo::getTargetDefines(const LangOptions &Opts,
     Builder.defineMacro("__SIZEOF_FLOAT128__", "16");
 }
 
+bool X86TargetInfo::isValidFeatureName(StringRef Name) const {
+  return llvm::StringSwitch<bool>(Name)
+      .Case("aes", true)
+      .Case("avx", true)
+      .Case("avx2", true)
+      .Case("avx512f", true)
+      .Case("avx512cd", true)
+      .Case("avx512vpopcntdq", true)
+      .Case("avx512er", true)
+      .Case("avx512pf", true)
+      .Case("avx512dq", true)
+      .Case("avx512bw", true)
+      .Case("avx512vl", true)
+      .Case("avx512vbmi", true)
+      .Case("avx512ifma", true)
+      .Case("bmi", true)
+      .Case("bmi2", true)
+      .Case("clflushopt", true)
+      .Case("clwb", true)
+      .Case("clzero", true)
+      .Case("cx16", true)
+      .Case("f16c", true)
+      .Case("fma", true)
+      .Case("fma4", true)
+      .Case("fsgsbase", true)
+      .Case("fxsr", true)
+      .Case("lwp", true)
+      .Case("lzcnt", true)
+      .Case("mm3dnow", true)
+      .Case("mm3dnowa", true)
+      .Case("mmx", true)
+      .Case("movbe", true)
+      .Case("mpx", true)
+      .Case("pclmul", true)
+      .Case("pku", true)
+      .Case("popcnt", true)
+      .Case("prefetchwt1", true)
+      .Case("prfchw", true)
+      .Case("rdrnd", true)
+      .Case("rdseed", true)
+      .Case("rtm", true)
+      .Case("sgx", true)
+      .Case("sha", true)
+      .Case("sse", true)
+      .Case("sse2", true)
+      .Case("sse3", true)
+      .Case("ssse3", true)
+      .Case("sse4.1", true)
+      .Case("sse4.2", true)
+      .Case("sse4a", true)
+      .Case("tbm", true)
+      .Case("x86", true)
+      .Case("x86_32", true)
+      .Case("x86_64", true)
+      .Case("xop", true)
+      .Case("xsave", true)
+      .Case("xsavec", true)
+      .Case("xsaves", true)
+      .Case("xsaveopt", true)
+      .Default(false);
+}
+
 bool X86TargetInfo::hasFeature(StringRef Feature) const {
   return llvm::StringSwitch<bool>(Feature)
       .Case("aes", HasAES)
@@ -4266,6 +4347,7 @@ bool X86TargetInfo::hasFeature(StringRef Feature) const {
       .Case("fma4", XOPLevel >= FMA4)
       .Case("fsgsbase", HasFSGSBASE)
       .Case("fxsr", HasFXSR)
+      .Case("lwp", HasLWP)
       .Case("lzcnt", HasLZCNT)
       .Case("mm3dnow", MMX3DNowLevel >= AMD3DNow)
       .Case("mm3dnowa", MMX3DNowLevel >= AMD3DNowAthlon)
@@ -4290,7 +4372,6 @@ bool X86TargetInfo::hasFeature(StringRef Feature) const {
       .Case("sse4.2", SSELevel >= SSE42)
       .Case("sse4a", XOPLevel >= SSE4A)
       .Case("tbm", HasTBM)
-      .Case("lwp", HasLWP)
       .Case("x86", true)
       .Case("x86_32", getTriple().getArch() == llvm::Triple::x86)
       .Case("x86_64", getTriple().getArch() == llvm::Triple::x86_64)
@@ -4333,11 +4414,11 @@ bool X86TargetInfo::validateCpuSupports(StringRef FeatureStr) const {
       .Case("avx512bw", true)
       .Case("avx512dq", true)
       .Case("avx512cd", true)
-      .Case("avx512vpopcntdq", true)
       .Case("avx512er", true)
       .Case("avx512pf", true)
       .Case("avx512vbmi", true)
       .Case("avx512ifma", true)
+      .Case("avx512vpopcntdq", true)
       .Default(false);
 }
 
@@ -4900,7 +4981,7 @@ public:
     case CC_Swift:
     case CC_X86VectorCall:
     case CC_IntelOclBicc:
-    case CC_X86_64Win64:
+    case CC_Win64:
     case CC_PreserveMost:
     case CC_PreserveAll:
     case CC_X86RegCall:
@@ -5635,6 +5716,11 @@ public:
         .Default(false);
   }
 
+  bool isValidCPUName(StringRef Name) const override {
+    return Name == "generic" ||
+           llvm::ARM::parseCPUArch(Name) != llvm::ARM::AK_INVALID;
+  }
+
   bool setCPU(const std::string &Name) override {
     if (Name != "generic")
       setArchInfo(llvm::ARM::parseCPUArch(Name));
@@ -6251,7 +6337,8 @@ class AArch64TargetInfo : public TargetInfo {
 
   enum FPUModeEnum {
     FPUMode,
-    NeonMode
+    NeonMode = (1 << 0),
+    SveMode = (1 << 1)
   };
 
   unsigned FPU;
@@ -6290,6 +6377,9 @@ public:
     LongDoubleWidth = LongDoubleAlign = SuitableAlign = 128;
     LongDoubleFormat = &llvm::APFloat::IEEEquad();
 
+    // Make __builtin_ms_va_list available.
+    HasBuiltinMSVaList = true;
+
     // {} in inline assembly are neon specifiers, not assembly variant
     // specifiers.
     NoAsmVariants = true;
@@ -6319,10 +6409,14 @@ public:
     return true;
   }
 
-  bool setCPU(const std::string &Name) override {
+  bool isValidCPUName(StringRef Name) const override {
     return Name == "generic" ||
            llvm::AArch64::parseCPUArch(Name) !=
            static_cast<unsigned>(llvm::AArch64::ArchKind::AK_INVALID);
+  }
+
+  bool setCPU(const std::string &Name) override {
+    return isValidCPUName(Name);
   }
 
   void getTargetDefinesARMV81A(const LangOptions &Opts,
@@ -6385,11 +6479,14 @@ public:
     Builder.defineMacro("__ARM_SIZEOF_MINIMAL_ENUM",
                         Opts.ShortEnums ? "1" : "4");
 
-    if (FPU == NeonMode) {
+    if (FPU & NeonMode) {
       Builder.defineMacro("__ARM_NEON", "1");
       // 64-bit NEON supports half, single and double precision operations.
       Builder.defineMacro("__ARM_NEON_FP", "0xE");
     }
+
+    if (FPU & SveMode)
+      Builder.defineMacro("__ARM_FEATURE_SVE", "1");
 
     if (CRC)
       Builder.defineMacro("__ARM_FEATURE_CRC32", "1");
@@ -6426,7 +6523,8 @@ public:
     return Feature == "aarch64" ||
       Feature == "arm64" ||
       Feature == "arm" ||
-      (Feature == "neon" && FPU == NeonMode);
+      (Feature == "neon" && (FPU & NeonMode)) ||
+      (Feature == "sve" && (FPU & SveMode));
   }
 
   bool handleTargetFeatures(std::vector<std::string> &Features,
@@ -6440,7 +6538,9 @@ public:
 
     for (const auto &Feature : Features) {
       if (Feature == "+neon")
-        FPU = NeonMode;
+        FPU |= NeonMode;
+      if (Feature == "+sve")
+        FPU |= SveMode;
       if (Feature == "+crc")
         CRC = 1;
       if (Feature == "+crypto")
@@ -6467,6 +6567,7 @@ public:
     case CC_PreserveMost:
     case CC_PreserveAll:
     case CC_OpenCLKernel:
+    case CC_Win64:
       return CCCR_OK;
     default:
       return CCCR_Warning;
@@ -6644,13 +6745,26 @@ public:
   MicrosoftARM64TargetInfo(const llvm::Triple &Triple,
                              const TargetOptions &Opts)
       : WindowsTargetInfo<AArch64leTargetInfo>(Triple, Opts), Triple(Triple) {
+
+    // This is an LLP64 platform.
+    // int:4, long:4, long long:8, long double:8.
     WCharType = UnsignedShort;
+    IntWidth = IntAlign = 32;
+    LongWidth = LongAlign = 32;
+    DoubleAlign = LongLongAlign = 64;
+    LongDoubleWidth = LongDoubleAlign = 64;
+    LongDoubleFormat = &llvm::APFloat::IEEEdouble();
+    IntMaxType = SignedLongLong;
+    Int64Type = SignedLongLong;
     SizeType = UnsignedLongLong;
+    PtrDiffType = SignedLongLong;
+    IntPtrType = SignedLongLong;
+
     TheCXXABI.set(TargetCXXABI::Microsoft);
   }
 
   void setDataLayout() override {
-    resetDataLayout("e-m:w-i64:64-i128:128-n32:64-S128");
+    resetDataLayout("e-m:w-p:64:64-i32:32-i64:64-i128:128-n32:64-S128");
   }
 
   void getVisualStudioDefines(const LangOptions &Opts,
@@ -6823,8 +6937,12 @@ public:
       .Default(nullptr);
   }
 
+  bool isValidCPUName(StringRef Name) const override {
+    return getHexagonCPUSuffix(Name);
+  }
+
   bool setCPU(const std::string &Name) override {
-    if (!getHexagonCPUSuffix(Name))
+    if (!isValidCPUName(Name))
       return false;
     CPU = Name;
     return true;
@@ -7002,6 +7120,12 @@ public:
     case CK_NONE:
       llvm_unreachable("Unhandled target CPU");
     }
+  }
+
+  bool isValidCPUName(StringRef Name) const override {
+    return llvm::StringSwitch<bool>(Name)
+              .Case("v11", true)
+              .Default(false);
   }
 
   bool setCPU(const std::string &Name) override {
@@ -7242,6 +7366,10 @@ public:
         .Default(CK_GENERIC);
   }
 
+  bool isValidCPUName(StringRef Name) const override {
+   return getCPUKind(Name) != CK_GENERIC; 
+  }
+
   bool setCPU(const std::string &Name) override {
     CPU = getCPUKind(Name);
     return CPU != CK_GENERIC;
@@ -7418,6 +7546,10 @@ public:
     }
   }
 
+  bool isValidCPUName(StringRef Name) const override {
+    return getCPUGeneration(SparcTargetInfo::getCPUKind(Name)) == CG_V9;
+  }
+
   bool setCPU(const std::string &Name) override {
     if (!SparcTargetInfo::setCPU(Name))
       return false;
@@ -7470,7 +7602,7 @@ public:
     if (HasVector)
       Builder.defineMacro("__VX__");
     if (Opts.ZVector)
-      Builder.defineMacro("__VEC__", "10301");
+      Builder.defineMacro("__VEC__", "10302");
   }
   ArrayRef<Builtin::Info> getTargetBuiltins() const override {
     return llvm::makeArrayRef(BuiltinInfo,
@@ -7497,8 +7629,14 @@ public:
       .Cases("arch9", "z196", 9)
       .Cases("arch10", "zEC12", 10)
       .Cases("arch11", "z13", 11)
+      .Cases("arch12", "z14", 12)
       .Default(-1);
   }
+
+  bool isValidCPUName(StringRef Name) const override {
+    return getISARevision(Name) != -1;
+  }
+
   bool setCPU(const std::string &Name) override {
     CPU = Name;
     ISARevision = getISARevision(CPU);
@@ -7513,6 +7651,8 @@ public:
       Features["transactional-execution"] = true;
     if (ISARevision >= 11)
       Features["vector"] = true;
+    if (ISARevision >= 12)
+      Features["vector-enhancements-1"] = true;
     return TargetInfo::initFeatureMap(Features, Diags, CPU, FeaturesVec);
   }
 
@@ -7542,6 +7682,7 @@ public:
         .Case("arch9", ISARevision >= 9)
         .Case("arch10", ISARevision >= 10)
         .Case("arch11", ISARevision >= 11)
+        .Case("arch12", ISARevision >= 12)
         .Case("htm", HasTransactionalExecution)
         .Case("vx", HasVector)
         .Default(false);
@@ -7953,8 +8094,12 @@ public:
     return false;
   }
 
+  bool isValidCPUName(StringRef Name) const override {
+    return Name == "nios2r1" || Name == "nios2r2";
+  }
+
   bool setCPU(const std::string &Name) override {
-    if (Name == "nios2r1" || Name == "nios2r2") {
+    if (isValidCPUName(Name)) {
       CPU = Name;
       return true;
     }
@@ -8221,8 +8366,7 @@ public:
     SizeType = UnsignedInt;
   }
 
-  bool setCPU(const std::string &Name) override {
-    CPU = Name;
+  bool isValidCPUName(StringRef Name) const override {
     return llvm::StringSwitch<bool>(Name)
         .Case("mips1", true)
         .Case("mips2", true)
@@ -8243,6 +8387,12 @@ public:
         .Case("p5600", true)
         .Default(false);
   }
+
+  bool setCPU(const std::string &Name) override {
+    CPU = Name;
+    return isValidCPUName(Name);
+  }
+
   const std::string& getCPU() const { return CPU; }
   bool
   initFeatureMap(llvm::StringMap<bool> &Features, DiagnosticsEngine &Diags,
@@ -8800,12 +8950,15 @@ private:
     }
     return true;
   }
-  bool setCPU(const std::string &Name) final {
+  bool isValidCPUName(StringRef Name) const final {
     return llvm::StringSwitch<bool>(Name)
               .Case("mvp",           true)
               .Case("bleeding-edge", true)
               .Case("generic",       true)
               .Default(false);
+  }
+  bool setCPU(const std::string &Name) final {
+    return isValidCPUName(Name);
   }
   ArrayRef<Builtin::Info> getTargetBuiltins() const final {
     return llvm::makeArrayRef(BuiltinInfo,
@@ -9526,7 +9679,7 @@ public:
                : TargetInfo::getLeastIntTypeByWidth(BitWidth, IsSigned);
   }
 
-  bool setCPU(const std::string &Name) override {
+  bool isValidCPUName(StringRef Name) const override {
     bool IsFamily = llvm::StringSwitch<bool>(Name)
       .Case("avr1", true)
       .Case("avr2", true)
@@ -9548,14 +9701,16 @@ public:
       .Case("avrtiny", true)
       .Default(false);
 
-    if (IsFamily) this->CPU = Name;
-
     bool IsMCU = std::find_if(AVRMcus.begin(), AVRMcus.end(),
       [&](const MCUInfo &Info) { return Info.Name == Name; }) != AVRMcus.end();
-
-    if (IsMCU) this->CPU = Name;
-
     return IsFamily || IsMCU;
+  }
+
+  bool setCPU(const std::string &Name) override {
+    bool isValid = isValidCPUName(Name);
+    if (isValid) 
+      CPU = Name;
+    return isValid;
   }
 
 protected:
