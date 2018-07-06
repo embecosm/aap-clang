@@ -53,9 +53,10 @@ enum class SymbolKind : uint8_t {
   ConversionFunction,
 
   Parameter,
+  Using,
 };
 
-enum class SymbolLanguage {
+enum class SymbolLanguage : uint8_t {
   C,
   ObjC,
   CXX,
@@ -63,16 +64,19 @@ enum class SymbolLanguage {
 };
 
 /// Language specific sub-kinds.
-enum class SymbolSubKind {
+enum class SymbolSubKind : uint8_t {
   None,
   CXXCopyConstructor,
   CXXMoveConstructor,
   AccessorGetter,
   AccessorSetter,
+  UsingTypename,
+  UsingValue,
 };
 
+typedef uint8_t SymbolPropertySet;
 /// Set of properties that provide additional info about a symbol.
-enum class SymbolProperty : uint8_t {
+enum class SymbolProperty : SymbolPropertySet {
   Generic                       = 1 << 0,
   TemplatePartialSpecialization = 1 << 1,
   TemplateSpecialization        = 1 << 2,
@@ -83,9 +87,10 @@ enum class SymbolProperty : uint8_t {
   Local                         = 1 << 7,
 };
 static const unsigned SymbolPropertyBitNum = 8;
-typedef unsigned SymbolPropertySet;
 
 /// Set of roles that are attributed to symbol occurrences.
+///
+/// Low 9 bits of clang-c/include/Index.h CXSymbolRole mirrors this enum.
 enum class SymbolRole : uint32_t {
   Declaration = 1 << 0,
   Definition  = 1 << 1,
@@ -124,8 +129,8 @@ struct SymbolRelation {
 struct SymbolInfo {
   SymbolKind Kind;
   SymbolSubKind SubKind;
-  SymbolPropertySet Properties;
   SymbolLanguage Lang;
+  SymbolPropertySet Properties;
 };
 
 SymbolInfo getSymbolInfo(const Decl *D);

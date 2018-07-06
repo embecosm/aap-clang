@@ -10,6 +10,7 @@
 #include "clang/Rewrite/Frontend/FrontendActions.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/Basic/CharInfo.h"
+#include "clang/Config/config.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -153,7 +154,7 @@ bool FixItRecompile::BeginInvocation(CompilerInstance &CI) {
   return true;
 }
 
-#ifdef CLANG_ENABLE_OBJC_REWRITER
+#if CLANG_ENABLE_OBJC_REWRITER
 
 std::unique_ptr<ASTConsumer>
 RewriteObjCAction::CreateASTConsumer(CompilerInstance &CI, StringRef InFile) {

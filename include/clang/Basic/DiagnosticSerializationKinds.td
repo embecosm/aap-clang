@@ -38,8 +38,8 @@ def err_pch_targetopt_mismatch : Error<
     "PCH file was compiled for the %0 '%1' but the current translation "
     "unit is being compiled for target '%2'">;
 def err_pch_targetopt_feature_mismatch : Error<
-    "%select{AST file|current translation unit}0 was compiled with the target "
-    "feature'%1' but the %select{current translation unit is|AST file was}0 "
+    "%select{AST file was|current translation unit is}0 compiled with the target "
+    "feature '%1' but the %select{current translation unit is|AST file was}0 "
     "not">;
 def err_pch_langopt_mismatch : Error<"%0 was %select{disabled|enabled}1 in "
     "PCH file but is currently %select{disabled|enabled}2">;
@@ -77,6 +77,8 @@ def err_imported_module_not_found : Error<
     "module '%0' in AST file '%1' (imported by AST file '%2') "
     "is not defined in any loaded module map file; "
     "maybe you need to load '%3'?">, DefaultFatal;
+def note_imported_by_pch_module_not_found : Note<
+    "consider adding '%0' to the header search path">;
 def err_imported_module_modmap_changed : Error<
     "module '%0' imported by AST file '%1' found in a different module map file"
     " (%2) than when the importing AST file was built (%3)">, DefaultFatal;
@@ -122,16 +124,55 @@ def note_second_module_difference : Note<
 def err_module_odr_violation_different_instantiations : Error<
   "instantiation of %q0 is different in different modules">;
 
+def err_module_odr_violation_definition_data : Error <
+  "%q0 has different definitions in different modules; first difference is "
+  "%select{definition in module '%2'|defined here}1 found "
+  "%select{"
+  "%4 base %plural{1:class|:classes}4|"
+  "%4 virtual base %plural{1:class|:classes}4|"
+  "%ordinal4 base class with type %5|"
+  "%ordinal4 %select{non-virtual|virtual}5 base class %6|"
+  "%ordinal4 base class %5 with "
+  "%select{public|protected|private|no}6 access specifier}3">;
+
+def note_module_odr_violation_definition_data : Note <
+  "but in '%0' found "
+  "%select{"
+  "%2 base %plural{1:class|:classes}2|"
+  "%2 virtual base %plural{1:class|:classes}2|"
+  "%ordinal2 base class with different type %3|"
+  "%ordinal2 %select{non-virtual|virtual}3 base class %4|"
+  "%ordinal2 base class %3 with "
+  "%select{public|protected|private|no}4 access specifier}1">;
+
+def err_module_odr_violation_template_parameter : Error <
+  "%q0 has different definitions in different modules; first difference is "
+  "%select{definition in module '%2'|defined here}1 found "
+  "%select{"
+  "unnamed template parameter|"
+  "template parameter %4|"
+  "template parameter with %select{no |}4default argument|"
+  "template parameter with default argument}3">;
+
+
+def note_module_odr_violation_template_parameter : Note <
+  "but in '%0' found "
+  "%select{"
+  "unnamed template parameter %2|"
+  "template parameter %2|"
+  "template parameter with %select{no |}2default argument|"
+  "template parameter with different default argument}1">;
+
 def err_module_odr_violation_mismatch_decl : Error<
   "%q0 has different definitions in different modules; first difference is "
   "%select{definition in module '%2'|defined here}1 found "
   "%select{end of class|public access specifier|private access specifier|"
   "protected access specifier|static assert|field|method|type alias|typedef|"
-  "data member|friend declaration}3">;
+  "data member|friend declaration|function template}3">;
 def note_module_odr_violation_mismatch_decl : Note<"but in '%0' found "
   "%select{end of class|public access specifier|private access specifier|"
   "protected access specifier|static assert|field|method|type alias|typedef|"
-  "data member|friend declaration}1">;
+  "data member|friend declaration|function template}1">;
 
 def err_module_odr_violation_mismatch_decl_diff : Error<
   "%q0 has different definitions in different modules; first difference is "
@@ -147,18 +188,35 @@ def err_module_odr_violation_mismatch_decl_diff : Error<
   "%select{non-|}5mutable field %4|"
   "field %4 with %select{no|an}5 initalizer|"
   "field %4 with an initializer|"
-  "method %4|"
-  "method %4 is %select{not deleted|deleted}5|"
-  "method %4 is %select{|pure }5%select{not virtual|virtual}6|"
-  "method %4 is %select{not static|static}5|"
-  "method %4 is %select{not volatile|volatile}5|"
-  "method %4 is %select{not const|const}5|"
-  "method %4 is %select{not inline|inline}5|"
-  "method %4 that has %5 parameter%s5|"
-  "method %4 with %ordinal5 parameter of type %6%select{| decayed from %8}7|"
-  "method %4 with %ordinal5 parameter named %6|"
-  "method %4 with %ordinal5 parameter with%select{out|}6 a default argument|"
-  "method %4 with %ordinal5 parameter with a default argument|"
+  "%select{method %5|constructor|destructor}4|"
+  "%select{method %5|constructor|destructor}4 "
+    "is %select{not deleted|deleted}6|"
+  "%select{method %5|constructor|destructor}4 "
+    "is %select{|pure }6%select{not virtual|virtual}7|"
+  "%select{method %5|constructor|destructor}4 "
+    "is %select{not static|static}6|"
+  "%select{method %5|constructor|destructor}4 "
+    "is %select{not volatile|volatile}6|"
+  "%select{method %5|constructor|destructor}4 "
+    "is %select{not const|const}6|"
+  "%select{method %5|constructor|destructor}4 "
+    "is %select{not inline|inline}6|"
+  "%select{method %5|constructor|destructor}4 "
+    "that has %6 parameter%s6|"
+  "%select{method %5|constructor|destructor}4 "
+    "with %ordinal6 parameter of type %7%select{| decayed from %9}8|"
+  "%select{method %5|constructor|destructor}4 "
+    "with %ordinal6 parameter named %7|"
+  "%select{method %5|constructor|destructor}4 "
+    "with %ordinal6 parameter with%select{out|}7 a default argument|"
+  "%select{method %5|constructor|destructor}4 "
+    "with %ordinal6 parameter with a default argument|"
+  "%select{method %5|constructor|destructor}4 "
+    "with %select{no |}6template arguments|"
+  "%select{method %5|constructor|destructor}4 "
+    "with %6 template argument%s6|"
+  "%select{method %5|constructor|destructor}4 "
+    "with %6 for %ordinal7 template argument|"
   "%select{typedef|type alias}4 name %5|"
   "%select{typedef|type alias}4 %5 with underlying type %6|"
   "data member with name %4|"
@@ -169,6 +227,18 @@ def err_module_odr_violation_mismatch_decl_diff : Error<
   "friend %select{class|function}4|"
   "friend %4|"
   "friend function %4|"
+  "function template %4 with %5 template parameter%s5|"
+  "function template %4 with %ordinal5 template parameter being a "
+    "%select{type|non-type|template}6 template parameter|"
+  "function template %4 with %ordinal5 template parameter "
+    "%select{with no name|named %7}6|"
+  "function template %4 with %ordinal5 template parameter with "
+    "%select{no |}6default argument|"
+  "function template %4 with %ordinal5 template parameter with "
+    "default argument %6|"
+  "function template %4 with %ordinal5 template parameter with one type|"
+  "function template %4 with %ordinal5 template parameter %select{not |}6"
+    "being a template parameter pack|"
   "}3">;
 
 def note_module_odr_violation_mismatch_decl_diff : Note<"but in '%0' found "
@@ -183,18 +253,35 @@ def note_module_odr_violation_mismatch_decl_diff : Note<"but in '%0' found "
   "%select{non-|}3mutable field %2|"
   "field %2 with %select{no|an}3 initializer|"
   "field %2 with a different initializer|"
-  "method %2|"
-  "method %2 is %select{not deleted|deleted}3|"
-  "method %2 is %select{|pure }3%select{not virtual|virtual}4|"
-  "method %2 is %select{not static|static}3|"
-  "method %2 is %select{not volatile|volatile}3|"
-  "method %2 is %select{not const|const}3|"
-  "method %2 is %select{not inline|inline}3|"
-  "method %2 that has %3 parameter%s3|"
-  "method %2 with %ordinal3 parameter of type %4%select{| decayed from %6}5|"
-  "method %2 with %ordinal3 parameter named %4|"
-  "method %2 with %ordinal3 parameter with%select{out|}4 a default argument|"
-  "method %2 with %ordinal3 parameter with a different default argument|"
+  "%select{method %3|constructor|destructor}2|"
+  "%select{method %3|constructor|destructor}2 "
+    "is %select{not deleted|deleted}4|"
+  "%select{method %3|constructor|destructor}2 "
+    "is %select{|pure }4%select{not virtual|virtual}5|"
+  "%select{method %3|constructor|destructor}2 "
+    "is %select{not static|static}4|"
+  "%select{method %3|constructor|destructor}2 "
+    "is %select{not volatile|volatile}4|"
+  "%select{method %3|constructor|destructor}2 "
+    "is %select{not const|const}4|"
+  "%select{method %3|constructor|destructor}2 "
+    "is %select{not inline|inline}4|"
+  "%select{method %3|constructor|destructor}2 "
+    "that has %4 parameter%s4|"
+  "%select{method %3|constructor|destructor}2 "
+    "with %ordinal4 parameter of type %5%select{| decayed from %7}6|"
+  "%select{method %3|constructor|destructor}2 "
+    "with %ordinal4 parameter named %5|"
+  "%select{method %3|constructor|destructor}2 "
+    "with %ordinal4 parameter with%select{out|}5 a default argument|"
+  "%select{method %3|constructor|destructor}2 "
+    "with %ordinal4 parameter with a different default argument|"
+  "%select{method %3|constructor|destructor}2 "
+    "with %select{no |}4template arguments|"
+  "%select{method %3|constructor|destructor}2 "
+    "with %4 template argument%s4|"
+  "%select{method %3|constructor|destructor}2 "
+    "with %4 for %ordinal5 template argument|"
   "%select{typedef|type alias}2 name %3|"
   "%select{typedef|type alias}2 %3 with different underlying type %4|"
   "data member with name %2|"
@@ -205,6 +292,41 @@ def note_module_odr_violation_mismatch_decl_diff : Note<"but in '%0' found "
   "friend %select{class|function}2|"
   "friend %2|"
   "friend function %2|"
+  "function template %2 with %3 template parameter%s3|"
+  "function template %2 with %ordinal3 template paramter being a "
+    "%select{type|non-type|template}4 template parameter|"
+  "function template %2 with %ordinal3 template parameter "
+    "%select{with no name|named %5}4|"
+  "function template %2 with %ordinal3 template parameter with "
+    "%select{no |}4default argument|"
+  "function template %2 with %ordinal3 template parameter with "
+    "default argument %4|"
+  "function template %2 with %ordinal3 template parameter with different type|"
+  "function template %2 with %ordinal3 template parameter %select{not |}4"
+    "being a template parameter pack|"
+  "}1">;
+
+def err_module_odr_violation_function : Error<
+  "%q0 has different definitions in different modules; "
+  "%select{definition in module '%2'|defined here}1 "
+  "first difference is "
+  "%select{"
+  "return type is %4|"
+  "%ordinal4 parameter with name %5|"
+  "%ordinal4 parameter with type %5%select{| decayed from %7}6|"
+  "%ordinal4 parameter with%select{out|}5 a default argument|"
+  "%ordinal4 parameter with a default argument|"
+  "function body"
+  "}3">;
+
+def note_module_odr_violation_function : Note<"but in '%0' found "
+  "%select{"
+  "different return type %2|"
+  "%ordinal2 parameter with name %3|"
+  "%ordinal2 parameter with type %3%select{| decayed from %5}4|"
+  "%ordinal2 parameter with%select{out|}3 a default argument|"
+  "%ordinal2 parameter with a different default argument|"
+  "a different body"
   "}1">;
 
 def err_module_odr_violation_mismatch_decl_unknown : Error<

@@ -50,17 +50,22 @@ public:
 
 namespace toolchains {
 
-class LLVM_LIBRARY_VISIBILITY Solaris : public Generic_GCC {
+class LLVM_LIBRARY_VISIBILITY Solaris : public Generic_ELF {
 public:
   Solaris(const Driver &D, const llvm::Triple &Triple,
           const llvm::opt::ArgList &Args);
 
   bool IsIntegratedAssemblerDefault() const override { return true; }
 
-  void AddClangCXXStdlibIncludeArgs(
-      const llvm::opt::ArgList &DriverArgs,
-      llvm::opt::ArgStringList &CC1Args) const override;
+  void
+  AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                            llvm::opt::ArgStringList &CC1Args) const override;
 
+  void
+  addLibStdCxxIncludePaths(const llvm::opt::ArgList &DriverArgs,
+                           llvm::opt::ArgStringList &CC1Args) const override;
+
+  SanitizerMask getSupportedSanitizers() const override;
   unsigned GetDefaultDwarfVersion() const override { return 2; }
 
 protected:

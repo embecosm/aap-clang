@@ -267,6 +267,12 @@ Sema::BuildCXXNamedCast(SourceLocation OpLoc, tok::TokenKind Kind,
                                                 AngleBrackets));
 
   case tok::kw_dynamic_cast: {
+    // OpenCL C++ 1.0 s2.9: dynamic_cast is not supported.
+    if (getLangOpts().OpenCLCPlusPlus) {
+      return ExprError(Diag(OpLoc, diag::err_openclcxx_not_supported)
+                       << "dynamic_cast");
+    }
+
     if (!TypeDependent) {
       Op.CheckDynamicCast();
       if (Op.SrcExpr.isInvalid())
@@ -552,7 +558,14 @@ CastsAwayConstness(Sema &Self, QualType SrcType, QualType DestType,
     Qualifiers SrcQuals, DestQuals;
     Self.Context.getUnqualifiedArrayType(UnwrappedSrcType, SrcQuals);
     Self.Context.getUnqualifiedArrayType(UnwrappedDestType, DestQuals);
-    
+
+    // We do not meaningfully track object const-ness of Objective-C object
+    // types. Remove const from the source type if either the source or
+    // the destination is an Objective-C object type.
+    if (UnwrappedSrcType->isObjCObjectType() ||
+        UnwrappedDestType->isObjCObjectType())
+      SrcQuals.removeConst();
+
     Qualifiers RetainedSrcQuals, RetainedDestQuals;
     if (CheckCVR) {
       RetainedSrcQuals.setCVRQualifiers(SrcQuals.getCVRQualifiers());
@@ -1138,7 +1151,7 @@ static TryCastResult TryStaticCast(Sema &Self, ExprResult &SrcExpr,
       }
     }
   }
-  // Allow arbitray objective-c pointer conversion with static casts.
+  // Allow arbitrary objective-c pointer conversion with static casts.
   if (SrcType->isObjCObjectPointerType() &&
       DestType->isObjCObjectPointerType()) {
     Kind = CK_BitCast;
@@ -2451,24 +2464,17 @@ void CastOperation::CheckCStyleCast() {
     // GCC's cast to union extension.
     if (DestRecordTy && DestRecordTy->getDecl()->isUnion()) {
       RecordDecl *RD = DestRecordTy->getDecl();
-      RecordDecl::field_iterator Field, FieldEnd;
-      for (Field = RD->field_begin(), FieldEnd = RD->field_end();
-           Field != FieldEnd; ++Field) {
-        if (Self.Context.hasSameUnqualifiedType(Field->getType(), SrcType) &&
-            !Field->isUnnamedBitfield()) {
-          Self.Diag(OpRange.getBegin(), diag::ext_typecheck_cast_to_union)
-            << SrcExpr.get()->getSourceRange();
-          break;
-        }
-      }
-      if (Field == FieldEnd) {
+      if (CastExpr::getTargetFieldForToUnionCast(RD, SrcType)) {
+        Self.Diag(OpRange.getBegin(), diag::ext_typecheck_cast_to_union)
+          << SrcExpr.get()->getSourceRange();
+        Kind = CK_ToUnion;
+        return;
+      } else {
         Self.Diag(OpRange.getBegin(), diag::err_typecheck_cast_to_union_no_type)
           << SrcType << SrcExpr.get()->getSourceRange();
         SrcExpr = ExprError();
         return;
       }
-      Kind = CK_ToUnion;
-      return;
     }
 
     // OpenCL v2.0 s6.13.10 - Allow casts from '0' to event_t type.

@@ -71,9 +71,8 @@ class PCHContainerGenerator : public ASTConsumer {
     }
 
     bool VisitImportDecl(ImportDecl *D) {
-      auto *Import = cast<ImportDecl>(D);
-      if (!Import->getImportedOwningModule())
-        DI.EmitImportDecl(*Import);
+      if (!D->getImportedOwningModule())
+        DI.EmitImportDecl(*D);
       return true;
     }
 
@@ -152,6 +151,9 @@ public:
     CodeGenOpts.CodeModel = "default";
     CodeGenOpts.ThreadModel = "single";
     CodeGenOpts.DebugTypeExtRefs = true;
+    // When building a module MainFileName is the name of the modulemap file.
+    CodeGenOpts.MainFileName =
+        LangOpts.CurrentModule.empty() ? MainFileName : LangOpts.CurrentModule;
     CodeGenOpts.setDebugInfo(codegenoptions::FullDebugInfo);
     CodeGenOpts.setDebuggerTuning(CI.getCodeGenOpts().getDebuggerTuning());
   }
@@ -226,6 +228,11 @@ public:
       Builder->getModuleDebugInfo()->completeRequiredType(RD);
   }
 
+  void HandleImplicitImportDecl(ImportDecl *D) override {
+    if (!D->getImportedOwningModule())
+      Builder->getModuleDebugInfo()->EmitImportDecl(*D);
+  }
+
   /// Emit a container holding the serialized AST.
   void HandleTranslationUnit(ASTContext &Ctx) override {
     assert(M && VMContext && Builder);
@@ -283,7 +290,7 @@ public:
     else
       ASTSym->setSection("__clangast");
 
-    DEBUG({
+    LLVM_DEBUG({
       // Print the IR for the PCH container to the debug output.
       llvm::SmallString<0> Buffer;
       clang::EmitBackendOutput(
