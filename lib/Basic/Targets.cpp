@@ -14,6 +14,7 @@
 
 #include "Targets.h"
 
+#include "Targets/AAP.h"
 #include "Targets/AArch64.h"
 #include "Targets/AMDGPU.h"
 #include "Targets/ARM.h"
@@ -132,6 +133,9 @@ TargetInfo *AllocateTarget(const llvm::Triple &Triple,
 
   case llvm::Triple::lanai:
     return new LanaiTargetInfo(Triple, Opts);
+
+  case llvm::Triple::aap:
+    return new AAPTargetInfo(Triple, Opts);
 
   case llvm::Triple::aarch64:
     if (Triple.isOSDarwin())
