@@ -28,6 +28,7 @@ public:
   AAPTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple) {
     NoAsmVariants = true;
+    TLSSupported = false;
 
     BoolWidth = HalfWidth = IntWidth = 16;
     PointerWidth = 16;
