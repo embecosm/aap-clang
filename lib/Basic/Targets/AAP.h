@@ -28,6 +28,23 @@ public:
   AAPTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple) {
     NoAsmVariants = true;
+
+    BoolWidth = HalfWidth = IntWidth = 16;
+    PointerWidth = 16;
+    LongWidth = 32;
+    FloatWidth = 32;
+    LongLongWidth = 64;
+    DoubleWidth = 64;
+
+    BoolAlign = HalfAlign = IntAlign = LongAlign = 16;
+    PointerAlign = 16;
+    FloatAlign = DoubleAlign = 16;
+
+    IntMaxType = Int64Type = SignedLongLong;
+    IntPtrType = SignedInt;
+    PtrDiffType = SignedInt;
+    SizeType = UnsignedInt;
+
     resetDataLayout("e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-n16");
   }
 
