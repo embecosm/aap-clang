@@ -4887,6 +4887,120 @@ PPC64TargetCodeGenInfo::initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
 }
 
 //===----------------------------------------------------------------------===//
+// AAP ABI Implementation
+//===----------------------------------------------------------------------===//
+
+namespace {
+class AAPABIInfo : public DefaultABIInfo {
+private:
+  // The size of the general purpose registers.
+  static const unsigned GPRBits = 16;
+
+public:
+  AAPABIInfo(CodeGen::CodeGenTypes &CGT) : DefaultABIInfo(CGT) {}
+
+  // Override computeInfo to call our classifyArgumentType & classifyReturnType
+  // instead of those defined by DefaultABIInfo.
+  void computeInfo(CGFunctionInfo &FI) const override;
+
+  ABIArgInfo classifyArgumentType(QualType Ty) const;
+  ABIArgInfo classifyReturnType(QualType RetTy) const;
+
+  Address EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
+                    QualType Ty) const override;
+};
+} // end anonymous namespace
+
+void AAPABIInfo::computeInfo(CGFunctionInfo &FI) const {
+  if (!getCXXABI().classifyReturnType(FI))
+    FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+  for (auto &I : FI.arguments())
+    I.info = classifyArgumentType(I.type);
+}
+
+ABIArgInfo AAPABIInfo::classifyArgumentType(QualType Ty) const {
+  // Ignore void.
+  if (Ty->isVoidType())
+    return ABIArgInfo::getIgnore();
+
+  Ty = useFirstFieldIfTransparentUnion(Ty);
+  unsigned Size = getContext().getTypeSize(Ty);
+
+  // Pass simple types directly.
+  if (!isAggregateTypeForABI(Ty) && !Ty->isVectorType()) {
+    // Treat an enum type as its underlying type.
+    if (const EnumType *EnumTy = Ty->getAs<EnumType>())
+      Ty = EnumTy->getDecl()->getIntegerType();
+
+    return Ty->isPromotableIntegerType() ? ABIArgInfo::getExtend(Ty)
+                                         : ABIArgInfo::getDirect();
+  }
+
+  // Ignore empty types.
+  if (isEmptyRecord(getContext(), Ty, true))
+    return ABIArgInfo::getIgnore();
+
+  // Pass aggregate types with non-trivial copy constructors and/or destructors
+  // indirectly.
+  if (CGCXXABI::RecordArgABI RAA = getRecordArgABI(Ty, getCXXABI()))
+    return getNaturalAlignIndirect(Ty, RAA == CGCXXABI::RAA_DirectInMemory);
+
+  // Pass small aggregate types (4 registers or smaller) directly as
+  // appropriate integer types or arrays.
+  if (Size <= 4 * GPRBits) {
+    // Find the appropriate argument size.
+    unsigned ArgSize = std::max(getContext().getTypeAlign(Ty),
+                                unsigned(GPRBits));
+
+    // If appropriate, pass the type as a single argument.
+    if (Size <= ArgSize)
+      return ABIArgInfo::getDirect(
+          llvm::IntegerType::get(getVMContext(), ArgSize));
+
+    // Pass the type as an array argument.
+    return ABIArgInfo::getDirect(
+        llvm::ArrayType::get(llvm::IntegerType::get(getVMContext(), ArgSize),
+                             Size / ArgSize));
+  }
+
+  // Pass larger aggregate types indirectly.
+  return getNaturalAlignIndirect(Ty, /*ByVal=*/false);
+}
+
+ABIArgInfo AAPABIInfo::classifyReturnType(QualType RetTy) const {
+  // The same rules apply to return arguments as they do to input arguments.
+  return classifyArgumentType(RetTy);
+}
+
+Address AAPABIInfo::EmitVAArg(CodeGenFunction &CGF, Address VAListAddr,
+                              QualType Ty) const {
+  CharUnits SlotSize = CharUnits::fromQuantity(GPRBits / 8);
+
+  // Empty records are ignored for parameter passing purposes.
+  if (isEmptyRecord(getContext(), Ty, true)) {
+    Address Addr(CGF.Builder.CreateLoad(VAListAddr), SlotSize);
+    Addr = CGF.Builder.CreateElementBitCast(Addr, CGF.ConvertTypeForMem(Ty));
+    return Addr;
+  }
+
+  auto SizeAndAlign = getContext().getTypeInfoInChars(Ty);
+
+  // Arguments bigger than 4 GPRs are passed indirectly.
+  bool IsIndirect = SizeAndAlign.first > 4 * SlotSize;
+
+  return emitVoidPtrVAArg(CGF, VAListAddr, Ty, IsIndirect, SizeAndAlign,
+                          SlotSize, /*AllowHigherAlign=*/true);
+}
+
+namespace {
+class AAPTargetCodeGenInfo : public TargetCodeGenInfo {
+public:
+  AAPTargetCodeGenInfo(CodeGen::CodeGenTypes &CGT)
+      : TargetCodeGenInfo(new AAPABIInfo(CGT)) {}
+};
+} // end anonymous namespace
+
+//===----------------------------------------------------------------------===//
 // AArch64 ABI Implementation
 //===----------------------------------------------------------------------===//
 
@@ -9064,6 +9178,9 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
 
   case llvm::Triple::avr:
     return SetCGInfo(new AVRTargetCodeGenInfo(Types));
+
+  case llvm::Triple::aap:
+    return SetCGInfo(new AAPTargetCodeGenInfo(Types));
 
   case llvm::Triple::aarch64:
   case llvm::Triple::aarch64_be: {
