@@ -284,7 +284,7 @@ double f_va_2(char *fmt, ...) {
 // CHECK:         [[FMT_ADDR:%.*]] = alloca i8*, align 2
 // CHECK-NEXT:    [[VA:%.*]] = alloca i8*, align 2
 // CHECK-NEXT:    [[V:%.*]] = alloca i16, align 2
-// CHECK-NEXT:    [[LD:%.*]] = alloca double, align 2
+// CHECK-NEXT:    [[LD:%.*]] = alloca double, align 8
 // CHECK-NEXT:    [[TS:%.*]] = alloca [[STRUCT_TINY:%.*]], align 1
 // CHECK-NEXT:    [[SS:%.*]] = alloca [[STRUCT_SMALL:%.*]], align 2
 // CHECK-NEXT:    [[LS:%.*]] = alloca [[STRUCT_LARGE:%.*]], align 2
@@ -303,7 +303,7 @@ double f_va_2(char *fmt, ...) {
 // CHECK-NEXT:    store i8* [[ARGP_NEXT3]], i8** [[VA]], align 2
 // CHECK-NEXT:    [[TMP2:%.*]] = bitcast i8* [[ARGP_CUR2]] to double*
 // CHECK-NEXT:    [[TMP3:%.*]] = load double, double* [[TMP2]], align 2
-// CHECK-NEXT:    store double [[TMP3]], double* [[LD]], align 2
+// CHECK-NEXT:    store double [[TMP3]], double* [[LD]], align 8
 // CHECK-NEXT:    [[ARGP_CUR4:%.*]] = load i8*, i8** [[VA]], align 2
 // CHECK-NEXT:    [[ARGP_NEXT5:%.*]] = getelementptr inbounds i8, i8* [[ARGP_CUR4]], i16 2
 // CHECK-NEXT:    store i8* [[ARGP_NEXT5]], i8** [[VA]], align 2
@@ -333,7 +333,7 @@ int f_va_3(char *fmt, ...) {
 
   __builtin_va_start(va, fmt);
   int v = __builtin_va_arg(va, int);
-  long double ld = __builtin_va_arg(va, long double);
+  double ld = __builtin_va_arg(va, double);
   struct tiny ts = __builtin_va_arg(va, struct tiny);
   struct small ss = __builtin_va_arg(va, struct small);
   struct large ls = __builtin_va_arg(va, struct large);
