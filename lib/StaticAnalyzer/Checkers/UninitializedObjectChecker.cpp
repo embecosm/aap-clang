@@ -10,19 +10,33 @@
 // This file defines a checker that reports uninitialized fields in objects
 // created after a constructor call.
 //
-// This checker has two options:
+// This checker has several options:
 //   - "Pedantic" (boolean). If its not set or is set to false, the checker
 //     won't emit warnings for objects that don't have at least one initialized
 //     field. This may be set with
 //
-//  `-analyzer-config alpha.cplusplus.UninitializedObject:Pedantic=true`.
+//     `-analyzer-config alpha.cplusplus.UninitializedObject:Pedantic=true`.
 //
 //   - "NotesAsWarnings" (boolean). If set to true, the checker will emit a
 //     warning for each uninitalized field, as opposed to emitting one warning
 //     per constructor call, and listing the uninitialized fields that belongs
 //     to it in notes. Defaults to false.
 //
-//  `-analyzer-config alpha.cplusplus.UninitializedObject:NotesAsWarnings=true`.
+//     `-analyzer-config \
+//         alpha.cplusplus.UninitializedObject:NotesAsWarnings=true`.
+//
+//   - "CheckPointeeInitialization" (boolean). If set to false, the checker will
+//     not analyze the pointee of pointer/reference fields, and will only check
+//     whether the object itself is initialized. Defaults to false.
+//
+//     `-analyzer-config \
+//         alpha.cplusplus.UninitializedObject:CheckPointeeInitialization=true`.
+//
+//     TODO: With some clever heuristics, some pointers should be dereferenced
+//     by default. For example, if the pointee is constructed within the
+//     constructor call, it's reasonable to say that no external object
+//     references it, and we wouldn't generate multiple report on the same
+//     pointee.
 //
 //===----------------------------------------------------------------------===//
 
@@ -44,13 +58,12 @@ public:
   // These fields will be initialized when registering the checker.
   bool IsPedantic;
   bool ShouldConvertNotesToWarnings;
+  bool CheckPointeeInitialization;
 
   UninitializedObjectChecker()
       : BT_uninitField(new BuiltinBug(this, "Uninitialized fields")) {}
-  void checkEndFunction(CheckerContext &C) const;
+  void checkEndFunction(const ReturnStmt *RS, CheckerContext &C) const;
 };
-
-llvm::ImmutableListFactory<const FieldRegion *> Factory;
 
 /// Represents a field chain. A field chain is a vector of fields where the
 /// first element of the chain is the object under checking (not stored), and
@@ -111,13 +124,16 @@ class FindUninitializedFields {
   const TypedValueRegion *const ObjectR;
 
   const bool IsPedantic;
+  const bool CheckPointeeInitialization;
+
   bool IsAnyFieldInitialized = false;
 
   UninitFieldSet UninitFields;
 
 public:
   FindUninitializedFields(ProgramStateRef State,
-                          const TypedValueRegion *const R, bool IsPedantic);
+                          const TypedValueRegion *const R, bool IsPedantic,
+                          bool CheckPointeeInitialization);
   const UninitFieldSet &getUninitFields();
 
 private:
@@ -133,12 +149,10 @@ private:
   //     - a non-union record
   //     - a pointer/reference
   //     - an array
-  //     - of a member pointer type
-  //     - of a primitive type, which we'll define as either a BuiltinType or
-  //       EnumeralType.
+  //     - of a primitive type, which we'll define later in a helper function.
   //   * the parent of each node is the object that contains it
-  //   * every leaf is an array, a primitive object, a member pointer, a nullptr
-  //     or an undefined pointer.
+  //   * every leaf is an array, a primitive object, a nullptr or an undefined
+  //   pointer.
   //
   // Example:
   //
@@ -165,8 +179,8 @@ private:
   //
   // From this we'll construct a vector of fieldchains, where each fieldchain
   // represents an uninitialized field. An uninitialized field may be a
-  // primitive object, a member pointer, a pointer, a pointee or a union without
-  // a single initialized field.
+  // primitive object, a pointer, a pointee or a union without a single
+  // initialized field.
   // In the above example, for the default constructor call we'll end up with
   // these fieldchains:
   //
@@ -191,10 +205,6 @@ private:
   bool isPointerOrReferenceUninit(const FieldRegion *FR,
                                   FieldChainInfo LocalChain);
 
-  /// This method checks a region of MemberPointerType, and returns true if the
-  /// the pointer is uninitialized.
-  bool isMemberPointerUninit(const FieldRegion *FR, FieldChainInfo LocalChain);
-
   /// This method returns true if the value of a primitive object is
   /// uninitialized.
   bool isPrimitiveUninit(const SVal &V);
@@ -205,39 +215,51 @@ private:
   // TODO: Add a support for nonloc::LocAsInteger.
 };
 
+} // end of anonymous namespace
+
+// Static variable instantionations.
+
+static llvm::ImmutableListFactory<const FieldRegion *> Factory;
+
 // Utility function declarations.
 
 /// Returns the object that was constructed by CtorDecl, or None if that isn't
 /// possible.
-Optional<nonloc::LazyCompoundVal>
+static Optional<nonloc::LazyCompoundVal>
 getObjectVal(const CXXConstructorDecl *CtorDecl, CheckerContext &Context);
 
 /// Checks whether the constructor under checking is called by another
 /// constructor.
-bool isCalledByConstructor(const CheckerContext &Context);
+static bool isCalledByConstructor(const CheckerContext &Context);
 
 /// Returns whether FD can be (transitively) dereferenced to a void pointer type
 /// (void*, void**, ...). The type of the region behind a void pointer isn't
 /// known, and thus FD can not be analyzed.
-bool isVoidPointer(const FieldDecl *FD);
+static bool isVoidPointer(const FieldDecl *FD);
 
-/// Returns true if T is a primitive type. We'll call a type primitive if it's
-/// either a BuiltinType or an EnumeralType.
-bool isPrimitiveType(const QualType &T) {
-  return T->isBuiltinType() || T->isEnumeralType();
+/// Returns true if T is a primitive type. We defined this type so that for
+/// objects that we'd only like analyze as much as checking whether their
+/// value is undefined or not, such as ints and doubles, can be analyzed with
+/// ease. This also helps ensuring that every special field type is handled
+/// correctly.
+static bool isPrimitiveType(const QualType &T) {
+  return T->isBuiltinType() || T->isEnumeralType() || T->isMemberPointerType();
 }
 
 /// Constructs a note message for a given FieldChainInfo object.
-void printNoteMessage(llvm::raw_ostream &Out, const FieldChainInfo &Chain);
+static void printNoteMessage(llvm::raw_ostream &Out,
+                             const FieldChainInfo &Chain);
 
-} // end of anonymous namespace
+/// Returns with Field's name. This is a helper function to get the correct name
+/// even if Field is a captured lambda variable.
+static StringRef getVariableName(const FieldDecl *Field);
 
 //===----------------------------------------------------------------------===//
 //                  Methods for UninitializedObjectChecker.
 //===----------------------------------------------------------------------===//
 
 void UninitializedObjectChecker::checkEndFunction(
-    CheckerContext &Context) const {
+    const ReturnStmt *RS, CheckerContext &Context) const {
 
   const auto *CtorDecl = dyn_cast_or_null<CXXConstructorDecl>(
       Context.getLocationContext()->getDecl());
@@ -258,8 +280,8 @@ void UninitializedObjectChecker::checkEndFunction(
   if (!Object)
     return;
 
-  FindUninitializedFields F(Context.getState(), Object->getRegion(),
-                            IsPedantic);
+  FindUninitializedFields F(Context.getState(), Object->getRegion(), IsPedantic,
+                            CheckPointeeInitialization);
 
   const UninitFieldSet &UninitFields = F.getUninitFields();
 
@@ -323,8 +345,10 @@ void UninitializedObjectChecker::checkEndFunction(
 //===----------------------------------------------------------------------===//
 
 FindUninitializedFields::FindUninitializedFields(
-    ProgramStateRef State, const TypedValueRegion *const R, bool IsPedantic)
-    : State(State), ObjectR(R), IsPedantic(IsPedantic) {}
+    ProgramStateRef State, const TypedValueRegion *const R, bool IsPedantic,
+    bool CheckPointeeInitialization)
+    : State(State), ObjectR(R), IsPedantic(IsPedantic),
+      CheckPointeeInitialization(CheckPointeeInitialization) {}
 
 const UninitFieldSet &FindUninitializedFields::getUninitFields() {
   isNonUnionUninit(ObjectR, FieldChainInfo());
@@ -389,13 +413,6 @@ bool FindUninitializedFields::isNonUnionUninit(const TypedValueRegion *R,
       continue;
     }
 
-    if (T->isMemberPointerType()) {
-      if (isMemberPointerUninit(FR, LocalChain))
-        ContainsUninitField = true;
-      continue;
-    }
-
-    // If this is a pointer or reference type.
     if (T->isPointerType() || T->isReferenceType()) {
       if (isPointerOrReferenceUninit(FR, LocalChain))
         ContainsUninitField = true;
@@ -471,6 +488,11 @@ bool FindUninitializedFields::isPointerOrReferenceUninit(
     return addFieldToUninits({LocalChain, FR});
   }
 
+  if (!CheckPointeeInitialization) {
+    IsAnyFieldInitialized = true;
+    return false;
+  }
+
   const FieldDecl *FD = FR->getDecl();
 
   // TODO: The dynamic type of a void pointer may be retrieved with
@@ -539,14 +561,6 @@ bool FindUninitializedFields::isPointerOrReferenceUninit(
   return false;
 }
 
-bool FindUninitializedFields::isMemberPointerUninit(const FieldRegion *FR,
-                                                    FieldChainInfo LocalChain) {
-  assert(FR->getDecl()->getType()->isMemberPointerType() &&
-         "This function only checks regions that hold MemberPointerTypes!");
-  // TODO: Implement support for MemberPointerTypes.
-  return false;
-}
-
 bool FindUninitializedFields::isPrimitiveUninit(const SVal &V) {
   if (V.isUndef())
     return true;
@@ -596,22 +610,6 @@ const FieldDecl *FieldChainInfo::getEndOfChain() const {
 // "uninitialized field 'this->x'", but we can't refer to 'x' directly,
 // we need an explicit namespace resolution whether the uninit field was
 // 'D1::x' or 'D2::x'.
-//
-// TODO: If a field in the fieldchain is a captured lambda parameter, this
-// function constructs an empty string for it:
-//
-//   template <class Callable> struct A {
-//     Callable c;
-//     A(const Callable &c, int) : c(c) {}
-//   };
-//
-//   int b; // say that this isn't zero initialized
-//   auto alwaysTrue = [&b](int a) { return true; };
-//
-// A call with these parameters: A<decltype(alwaysTrue)>::A(alwaysTrue, int())
-// will emit a note with the message "uninitialized field: 'this->c.'". If
-// possible, the lambda parameter name should be retrieved or be replaced with a
-// "<lambda parameter>" or something similar.
 void FieldChainInfo::print(llvm::raw_ostream &Out) const {
   if (Chain.isEmpty())
     return;
@@ -619,7 +617,7 @@ void FieldChainInfo::print(llvm::raw_ostream &Out) const {
   const llvm::ImmutableListImpl<const FieldRegion *> *L =
       Chain.getInternalPointer();
   printTail(Out, L->getTail());
-  Out << L->getHead()->getDecl()->getNameAsString();
+  Out << getVariableName(L->getHead()->getDecl());
 }
 
 void FieldChainInfo::printTail(
@@ -630,7 +628,7 @@ void FieldChainInfo::printTail(
 
   printTail(Out, L->getTail());
   const FieldDecl *Field = L->getHead()->getDecl();
-  Out << Field->getNameAsString();
+  Out << getVariableName(Field);
   Out << (Field->getType()->isPointerType() ? "->" : ".");
 }
 
@@ -638,9 +636,7 @@ void FieldChainInfo::printTail(
 //                           Utility functions.
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-bool isVoidPointer(const FieldDecl *FD) {
+static bool isVoidPointer(const FieldDecl *FD) {
   QualType T = FD->getType();
 
   while (!T.isNull()) {
@@ -651,7 +647,7 @@ bool isVoidPointer(const FieldDecl *FD) {
   return false;
 }
 
-Optional<nonloc::LazyCompoundVal>
+static Optional<nonloc::LazyCompoundVal>
 getObjectVal(const CXXConstructorDecl *CtorDecl, CheckerContext &Context) {
 
   Loc ThisLoc = Context.getSValBuilder().getCXXThis(CtorDecl->getParent(),
@@ -668,7 +664,7 @@ getObjectVal(const CXXConstructorDecl *CtorDecl, CheckerContext &Context) {
 // TODO: We should also check that if the constructor was called by another
 // constructor, whether those two are in any relation to one another. In it's
 // current state, this introduces some false negatives.
-bool isCalledByConstructor(const CheckerContext &Context) {
+static bool isCalledByConstructor(const CheckerContext &Context) {
   const LocationContext *LC = Context.getLocationContext()->getParent();
 
   while (LC) {
@@ -680,7 +676,8 @@ bool isCalledByConstructor(const CheckerContext &Context) {
   return false;
 }
 
-void printNoteMessage(llvm::raw_ostream &Out, const FieldChainInfo &Chain) {
+static void printNoteMessage(llvm::raw_ostream &Out,
+                             const FieldChainInfo &Chain) {
   if (Chain.isPointer()) {
     if (Chain.isDereferenced())
       Out << "uninitialized pointee 'this->";
@@ -692,7 +689,20 @@ void printNoteMessage(llvm::raw_ostream &Out, const FieldChainInfo &Chain) {
   Out << "'";
 }
 
-} // end of anonymous namespace
+static StringRef getVariableName(const FieldDecl *Field) {
+  // If Field is a captured lambda variable, Field->getName() will return with
+  // an empty string. We can however acquire it's name from the lambda's
+  // captures.
+  const auto *CXXParent = dyn_cast<CXXRecordDecl>(Field->getParent());
+
+  if (CXXParent && CXXParent->isLambda()) {
+    assert(CXXParent->captures_begin());
+    auto It = CXXParent->captures_begin() + Field->getFieldIndex();
+    return It->getCapturedVar()->getName();
+  }
+
+  return Field->getName();
+}
 
 void ento::registerUninitializedObjectChecker(CheckerManager &Mgr) {
   auto Chk = Mgr.registerChecker<UninitializedObjectChecker>();
@@ -700,4 +710,6 @@ void ento::registerUninitializedObjectChecker(CheckerManager &Mgr) {
       "Pedantic", /*DefaultVal*/ false, Chk);
   Chk->ShouldConvertNotesToWarnings = Mgr.getAnalyzerOptions().getBooleanOption(
       "NotesAsWarnings", /*DefaultVal*/ false, Chk);
+  Chk->CheckPointeeInitialization = Mgr.getAnalyzerOptions().getBooleanOption(
+      "CheckPointeeInitialization", /*DefaultVal*/ false, Chk);
 }

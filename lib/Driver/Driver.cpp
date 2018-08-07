@@ -38,6 +38,7 @@
 #include "ToolChains/NetBSD.h"
 #include "ToolChains/OpenBSD.h"
 #include "ToolChains/PS4CPU.h"
+#include "ToolChains/RISCV.h"
 #include "ToolChains/Solaris.h"
 #include "ToolChains/TCE.h"
 #include "ToolChains/WebAssembly.h"
@@ -1292,12 +1293,13 @@ void Driver::generateCompilationDiagnostics(
   // Assume associated files are based off of the first temporary file.
   CrashReportInfo CrashInfo(TempFiles[0], VFS);
 
-  std::string Script = CrashInfo.Filename.rsplit('.').first.str() + ".sh";
+  llvm::SmallString<128> Script(CrashInfo.Filename);
+  llvm::sys::path::replace_extension(Script, "sh");
   std::error_code EC;
   llvm::raw_fd_ostream ScriptOS(Script, EC, llvm::sys::fs::CD_CreateNew);
   if (EC) {
     Diag(clang::diag::note_drv_command_failed_diag_msg)
-        << "Error generating run script: " + Script + " " + EC.message();
+        << "Error generating run script: " << Script << " " << EC.message();
   } else {
     ScriptOS << "# Crash reproducer for " << getClangFullVersion() << "\n"
              << "# Driver args: ";
@@ -1309,7 +1311,7 @@ void Driver::generateCompilationDiagnostics(
       ScriptOS << "\n# Additional information: " << AdditionalInformation
                << "\n";
     if (Report)
-      Report->TemporaryFiles.push_back(Script);
+      Report->TemporaryFiles.push_back(Script.str());
     Diag(clang::diag::note_drv_command_failed_diag_msg) << Script;
   }
 
@@ -2809,7 +2811,7 @@ public:
           C.MakeAction<OffloadUnbundlingJobAction>(HostAction);
       UnbundlingHostAction->registerDependentActionInfo(
           C.getSingleOffloadToolChain<Action::OFK_Host>(),
-          /*BoundArch=*/"all", Action::OFK_Host);
+          /*BoundArch=*/StringRef(), Action::OFK_Host);
       HostAction = UnbundlingHostAction;
     }
 
@@ -3868,7 +3870,7 @@ InputInfo Driver::BuildJobsForActionNoCache(
       StringRef Arch;
       if (TargetDeviceOffloadKind == Action::OFK_HIP) {
         if (UI.DependentOffloadKind == Action::OFK_Host)
-          Arch = "all";
+          Arch = StringRef();
         else
           Arch = UI.DependentBoundArch;
       } else
@@ -4019,8 +4021,22 @@ const char *Driver::GetNamedOutputPath(Compilation &C, const JobAction &JA,
       CCGenDiagnostics) {
     StringRef Name = llvm::sys::path::filename(BaseInput);
     std::pair<StringRef, StringRef> Split = Name.split('.');
-    std::string TmpName = GetTemporaryPath(
-        Split.first, types::getTypeTempSuffix(JA.getType(), IsCLMode()));
+    SmallString<128> TmpName;
+    const char *Suffix = types::getTypeTempSuffix(JA.getType(), IsCLMode());
+    Arg *A = C.getArgs().getLastArg(options::OPT_fcrash_diagnostics_dir);
+    if (CCGenDiagnostics && A) {
+      SmallString<128> CrashDirectory(A->getValue());
+      llvm::sys::path::append(CrashDirectory, Split.first);
+      const char *Middle = Suffix ? "-%%%%%%." : "-%%%%%%";
+      std::error_code EC =
+          llvm::sys::fs::createUniqueFile(CrashDirectory + Middle + Suffix, TmpName);
+      if (EC) {
+        Diag(clang::diag::err_unable_to_make_temp) << EC.message();
+        return "";
+      }
+    } else {
+      TmpName = GetTemporaryPath(Split.first, Suffix);
+    }
     return C.addTempFile(C.getArgs().MakeArgString(TmpName));
   }
 
@@ -4387,6 +4403,10 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
         break;
       case llvm::Triple::aap:
         TC = llvm::make_unique<toolchains::AAPToolChain>(*this, Target, Args);
+        break;
+      case llvm::Triple::riscv32:
+      case llvm::Triple::riscv64:
+        TC = llvm::make_unique<toolchains::RISCVToolChain>(*this, Target, Args);
         break;
       default:
         if (Target.getVendor() == llvm::Triple::Myriad)

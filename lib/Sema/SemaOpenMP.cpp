@@ -4909,7 +4909,8 @@ checkOpenMPLoop(OpenMPDirectiveKind DKind, Expr *CollapseLoopCountExpr,
     ExprResult IsUBGreater = SemaRef.BuildBinOp(CurScope, InitLoc, BO_GT,
                                                 UB.get(), LastIteration.get());
     ExprResult CondOp = SemaRef.ActOnConditionalOp(
-        InitLoc, InitLoc, IsUBGreater.get(), LastIteration.get(), UB.get());
+        LastIteration.get()->getExprLoc(), InitLoc, IsUBGreater.get(),
+        LastIteration.get(), UB.get());
     EUB = SemaRef.BuildBinOp(CurScope, InitLoc, BO_Assign, UB.get(),
                              CondOp.get());
     EUB = SemaRef.ActOnFinishFullExpr(EUB.get());
@@ -13012,8 +13013,12 @@ void Sema::checkDeclIsAllowedInOpenMPTarget(Expr *E, Decl *D,
     return;
   SourceRange SR = E ? E->getSourceRange() : D->getSourceRange();
   SourceLocation SL = E ? E->getLocStart() : D->getLocation();
-  // 2.10.6: threadprivate variable cannot appear in a declare target directive.
   if (auto *VD = dyn_cast<VarDecl>(D)) {
+    // Only global variables can be marked as declare target.
+    if (VD->isLocalVarDeclOrParm())
+      return;
+    // 2.10.6: threadprivate variable cannot appear in a declare target
+    // directive.
     if (DSAStack->isThreadPrivate(VD)) {
       Diag(SL, diag::err_omp_threadprivate_in_target);
       reportOriginalDsa(*this, DSAStack, VD, DSAStack->getTopDSA(VD, false));
