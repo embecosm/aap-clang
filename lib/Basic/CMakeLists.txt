@@ -69,6 +69,7 @@ add_clang_library(clangBasic
   SourceManager.cpp
   TargetInfo.cpp
   Targets.cpp
+  Targets/AAP.cpp
   Targets/AArch64.cpp
   Targets/AMDGPU.cpp
   Targets/ARM.cpp

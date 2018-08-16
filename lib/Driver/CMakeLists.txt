@@ -29,6 +29,7 @@ add_clang_library(clangDriver
   ToolChains/Arch/Sparc.cpp
   ToolChains/Arch/SystemZ.cpp
   ToolChains/Arch/X86.cpp
+  ToolChains/AAP.cpp
   ToolChains/Ananas.cpp
   ToolChains/AMDGPU.cpp
   ToolChains/AVR.cpp

@@ -516,8 +516,10 @@ static bool useFramePointerForTargetByDefault(const ArgList &Args,
   case llvm::Triple::xcore:
   case llvm::Triple::wasm32:
   case llvm::Triple::wasm64:
+  case llvm::Triple::aap:
     // XCore never wants frame pointers, regardless of OS.
     // WebAssembly never wants frame pointers.
+    // AAP nevers wants frame pointers.
     return false;
   case llvm::Triple::riscv32:
   case llvm::Triple::riscv64:
@@ -1288,6 +1290,11 @@ static bool isNoCommonDefault(const llvm::Triple &Triple) {
   }
 }
 
+void Clang::AddAAPTargetArgs(const ArgList &Args,
+                             ArgStringList &CmdArgs) const {
+  return;
+}
+
 void Clang::AddARMTargetArgs(const llvm::Triple &Triple, const ArgList &Args,
                              ArgStringList &CmdArgs, bool KernelOrKext) const {
   // Select the ABI to use.
@@ -1349,6 +1356,10 @@ void Clang::RenderTargetOptions(const llvm::Triple &EffectiveTriple,
   // Add target specific flags.
   switch (TC.getArch()) {
   default:
+    break;
+
+  case llvm::Triple::aap:
+    AddAAPTargetArgs(Args, CmdArgs);
     break;
 
   case llvm::Triple::arm:
